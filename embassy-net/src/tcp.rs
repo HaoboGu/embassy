@@ -680,6 +680,33 @@ mod embedded_io_impls {
             }
         }
     }
+    
+    impl core::fmt::Display for ConnectError {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            let message = match self {
+                ConnectError::ConnectionReset => "Connection Reset",
+                ConnectError::TimedOut => "Timeout",
+                ConnectError::NoRoute => "No Route",
+                ConnectError::InvalidState => "Invalid State",
+            };
+
+            write!(f, "{}", message)
+        }
+    }
+    
+    impl core::error::Error for ConnectError {}
+
+    impl core::fmt::Display for Error {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            let message = match self {
+                Error::ConnectionReset => "Connection Reset",
+            };
+
+            write!(f, "{}", message)
+        }
+    }
+
+    impl core::error::Error for Error {}
 
     impl embedded_io_async::Error for Error {
         fn kind(&self) -> embedded_io_async::ErrorKind {

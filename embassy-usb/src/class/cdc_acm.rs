@@ -420,6 +420,11 @@ impl<'d, D: Driver<'d>> embedded_io_async::Write for Sender<'d, D> {
         self.write_packet(&buf[..len]).await?;
         Ok(len)
     }
+    
+    async fn flush(&mut self) -> Result<(), Self::Error> { 
+        // TODO: Is empty impl fine here?
+        Ok(())
+    }
 }
 
 /// CDC ACM class packet receiver.

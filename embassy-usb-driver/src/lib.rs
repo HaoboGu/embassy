@@ -437,3 +437,16 @@ impl embedded_io_async::Error for EndpointError {
         }
     }
 }
+
+impl core::fmt::Display for EndpointError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let message = match self {
+            Self::BufferOverflow => "Buffer Overflow",
+            Self::Disabled => "Disabled",
+        };
+
+        write!(f, "{}", message)
+    }
+}
+
+impl core::error::Error for EndpointError {}

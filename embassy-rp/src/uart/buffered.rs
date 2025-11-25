@@ -615,6 +615,15 @@ impl embedded_io::Error for Error {
     }
 }
 
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let message = "Buffered UART error";
+        write!(f, "{}", message)
+    }
+}
+
+impl core::error::Error for Error {}
+
 impl embedded_io_async::ErrorType for BufferedUart {
     type Error = Error;
 }
