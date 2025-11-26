@@ -25,6 +25,7 @@ build = [
     {target = "thumbv8m.main-none-eabihf", features = ["gpiote", "nrf5340-net", "time", "time-driver-rtc1"]},
     {target = "thumbv8m.main-none-eabihf", features = ["gpiote", "nrf54l15-app-s", "time", "time-driver-rtc1"]},
     {target = "thumbv8m.main-none-eabihf", features = ["gpiote", "nrf54l15-app-ns", "time", "time-driver-rtc1"]},
+    {target = "thumbv8m.main-none-eabihf", features = ["gpiote", "nrf54lm20-app-s", "time", "time-driver-rtc1"]},
     {target = "thumbv7em-none-eabi", features = ["gpiote", "nrf52840", "time"]},
     {target = "thumbv7em-none-eabi", features = ["gpiote", "nrf52840", "time-driver-rtc1"]},
     {target = "thumbv7em-none-eabi", features = ["gpiote", "nrf52840", "time", "time-driver-rtc1"]},
@@ -129,6 +130,8 @@ nrf5340-net = ["_nrf5340-net"]
 nrf54l15-app-s = ["_nrf54l15-app", "_s", "_multi_wdt"]
 ## nRF54L15 application core in Non-Secure mode
 nrf54l15-app-ns = ["_nrf54l15-app", "_ns"]
+## nRF54LM20 application core in Secure mode
+nrf54lm20-app-s = ["_nrf54lm20-app", "_s", "_multi_wdt"]
 
 ## nRF9160 in Secure mode
 nrf9160-s = ["_nrf9160", "_s", "_nrf91"]
@@ -151,7 +154,9 @@ _nrf5340-app = ["_nrf5340", "_multi_wdt", "nrf-pac/nrf5340-app"]
 _nrf5340-net = ["_nrf5340", "nrf-pac/nrf5340-net"]
 _nrf5340 = ["_gpio-p1", "_dppi"]
 _nrf54l15-app = ["_nrf54l15", "nrf-pac/nrf54l15-app"]
+_nrf54lm20-app = ["_nrf54lm20", "nrf-pac/nrf54lm20a-app"]
 _nrf54l15 = ["_nrf54l", "_gpio-p1", "_gpio-p2"]
+_nrf54lm20 = ["_nrf54l", "_gpio-p1", "_gpio-p2"]
 _nrf54l = ["_dppi"]
 
 _nrf9160 = ["nrf-pac/nrf9160", "_dppi", "_spi-v1"]
@@ -200,7 +205,7 @@ embedded-io-async = { version = "0.6.1" }
 rand-core-06 = { package = "rand_core", version = "0.6" }
 rand-core-09 = { package = "rand_core", version = "0.9" }
 
-nrf-pac = { version = "0.1.0", git = "https://github.com/embassy-rs/nrf-pac.git", rev = "58198c23bce72edc10b4e1656d1b54441fc74e7c" }
+nrf-pac = { version = "0.1.0", git = "https://github.com/embassy-rs/nrf-pac.git", rev = "0068816c482932e3c59964817610ef41e79a6843" }
 
 defmt = { version = "1.0.1", optional = true }
 bitflags = "2.4.2"
