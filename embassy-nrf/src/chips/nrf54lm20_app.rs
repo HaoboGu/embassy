@@ -26,7 +26,6 @@ pub mod pac {
         PPIB10_NS as PPIB10,
         PPIB11_NS as PPIB11,
         TIMER10_NS as TIMER10,
-        RTC10_NS as RTC10,
         EGU10_NS as EGU10,
         RADIO_NS as RADIO,
         DPPIC20_NS as DPPIC20,
@@ -76,7 +75,6 @@ pub mod pac {
         TWIM30_NS as TWIM30,
         TWIS30_NS as TWIS30,
         UARTE30_NS as UARTE30,
-        RTC30_NS as RTC30,
         COMP_NS as COMP,
         LPCOMP_NS as LPCOMP,
         WDT31_NS as WDT31,
@@ -199,7 +197,7 @@ pub mod pac {
 pub const EASY_DMA_SIZE: usize = (1 << 16) - 1;
 pub const FORCE_COPY_BUFFER_SIZE: usize = 1024;
 
-// 1.5 MB NVM
+// 2 MB NVM
 #[allow(unused)]
 pub const FLASH_SIZE: usize = 2048 * 1024;
 
@@ -398,6 +396,20 @@ embassy_hal_internal::peripherals! {
     P1_14,
     P1_15,
     P1_16,
+    P1_17,
+    P1_18,
+    P1_19,
+    P1_20,
+    P1_21,
+    P1_22,
+    P1_23,
+    P1_24,
+    P1_25,
+    P1_26,
+    P1_27,
+    P1_28,
+    P1_29,
+    P1_30,
 
 
     // GPIO port 2
@@ -414,11 +426,19 @@ embassy_hal_internal::peripherals! {
     P2_10,
 
     // GRTC
-    GRTC,
-
-    // RTC
-    RTC10,
-    RTC30,
+    GRTC_CH0,
+    #[cfg(not(feature = "time-driver-grtc"))]
+    GRTC_CH1,
+    GRTC_CH2,
+    GRTC_CH3,
+    GRTC_CH4,
+    GRTC_CH5,
+    GRTC_CH6,
+    GRTC_CH7,
+    GRTC_CH8,
+    GRTC_CH9,
+    GRTC_CH10,
+    GRTC_CH11,
 
     // PWM
     PWM20,
@@ -502,6 +522,20 @@ impl_pin!(P1_13, 1, 13);
 impl_pin!(P1_14, 1, 14);
 impl_pin!(P1_15, 1, 15);
 impl_pin!(P1_16, 1, 16);
+impl_pin!(P1_17, 1, 17);
+impl_pin!(P1_18, 1, 18);
+impl_pin!(P1_19, 1, 19);
+impl_pin!(P1_20, 1, 20);
+impl_pin!(P1_21, 1, 21);
+impl_pin!(P1_22, 1, 22);
+impl_pin!(P1_23, 1, 23);
+impl_pin!(P1_24, 1, 24);
+impl_pin!(P1_25, 1, 25);
+impl_pin!(P1_26, 1, 26);
+impl_pin!(P1_27, 1, 27);
+impl_pin!(P1_28, 1, 28);
+impl_pin!(P1_29, 1, 29);
+impl_pin!(P1_30, 1, 30);
 
 impl_pin!(P2_00, 2, 0);
 impl_pin!(P2_01, 2, 1);
@@ -544,9 +578,6 @@ cfg_if::cfg_if! {
         impl_gpiote_pin!(P1_16, GPIOTE20);
     }
 }
-
-impl_rtc!(RTC10, RTC10, RTC10);
-impl_rtc!(RTC30, RTC30, RTC30);
 
 #[cfg(feature = "_ns")]
 impl_wdt!(WDT, WDT31, WDT31, 0);
@@ -700,7 +731,6 @@ embassy_hal_internal::interrupt_mod!(
     TIMER00,
     SPU10,
     TIMER10,
-    RTC10,
     EGU10,
     RADIO_0,
     RADIO_1,
@@ -725,7 +755,6 @@ embassy_hal_internal::interrupt_mod!(
     GPIOTE20_0,
     GPIOTE20_1,
     TAMPC,
-    I2S20,
     QDEC20,
     QDEC21,
     GRTC_0,
@@ -734,7 +763,6 @@ embassy_hal_internal::interrupt_mod!(
     GRTC_3,
     SPU30,
     SERIAL30,
-    RTC30,
     COMP_LPCOMP,
     WDT30,
     WDT31,

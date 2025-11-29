@@ -10,7 +10,7 @@ use {defmt_rtt as _, panic_probe as _};
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     let p = embassy_nrf::init(Default::default());
-    let mut led = Output::new(p.P2_09, Level::Low, OutputDrive::Standard);
+    let mut led = Output::new(p.P1_22, Level::Low, OutputDrive::Standard);
 
     loop {
         info!("high!");
