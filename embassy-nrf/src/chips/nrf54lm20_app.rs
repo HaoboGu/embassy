@@ -595,6 +595,9 @@ cfg_if::cfg_if! {
         impl_gpiote_pin!(P0_04, GPIOTE30);
         impl_gpiote_pin!(P0_05, GPIOTE30);
         impl_gpiote_pin!(P0_06, GPIOTE30);
+        impl_gpiote_pin!(P0_07, GPIOTE30);
+        impl_gpiote_pin!(P0_08, GPIOTE30);
+        impl_gpiote_pin!(P0_09, GPIOTE30);
 
         impl_gpiote_pin!(P1_00, GPIOTE20);
         impl_gpiote_pin!(P1_01, GPIOTE20);
@@ -613,6 +616,35 @@ cfg_if::cfg_if! {
         impl_gpiote_pin!(P1_14, GPIOTE20);
         impl_gpiote_pin!(P1_15, GPIOTE20);
         impl_gpiote_pin!(P1_16, GPIOTE20);
+        impl_gpiote_pin!(P1_17, GPIOTE20);
+        impl_gpiote_pin!(P1_18, GPIOTE20);
+        impl_gpiote_pin!(P1_19, GPIOTE20);
+        impl_gpiote_pin!(P1_20, GPIOTE20);
+        impl_gpiote_pin!(P1_21, GPIOTE20);
+        impl_gpiote_pin!(P1_22, GPIOTE20);
+        impl_gpiote_pin!(P1_23, GPIOTE20);
+        impl_gpiote_pin!(P1_24, GPIOTE20);
+        impl_gpiote_pin!(P1_25, GPIOTE20);
+        impl_gpiote_pin!(P1_26, GPIOTE20);
+        impl_gpiote_pin!(P1_27, GPIOTE20);
+        impl_gpiote_pin!(P1_28, GPIOTE20);
+        impl_gpiote_pin!(P1_29, GPIOTE20);
+        impl_gpiote_pin!(P1_30, GPIOTE20);
+        impl_gpiote_pin!(P1_31, GPIOTE20);
+
+        impl_gpiote_pin!(P3_00, GPIOTE20);
+        impl_gpiote_pin!(P3_01, GPIOTE20);
+        impl_gpiote_pin!(P3_02, GPIOTE20);
+        impl_gpiote_pin!(P3_03, GPIOTE20);
+        impl_gpiote_pin!(P3_04, GPIOTE20);
+        impl_gpiote_pin!(P3_05, GPIOTE20);
+        impl_gpiote_pin!(P3_06, GPIOTE20);
+        impl_gpiote_pin!(P3_07, GPIOTE20);
+        impl_gpiote_pin!(P3_08, GPIOTE20);
+        impl_gpiote_pin!(P3_09, GPIOTE20);
+        impl_gpiote_pin!(P3_10, GPIOTE20);
+        impl_gpiote_pin!(P3_11, GPIOTE20);
+        impl_gpiote_pin!(P3_12, GPIOTE20);
     }
 }
 
