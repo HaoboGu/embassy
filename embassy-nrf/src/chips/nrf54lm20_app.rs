@@ -428,7 +428,7 @@ embassy_hal_internal::peripherals! {
     P2_08,
     P2_09,
     P2_10,
-    
+
     // GPIO port 3
     P3_00,
     P3_01,
@@ -571,7 +571,6 @@ impl_pin!(P2_07, 2, 7);
 impl_pin!(P2_08, 2, 8);
 impl_pin!(P2_09, 2, 9);
 impl_pin!(P2_10, 2, 10);
-
 
 impl_pin!(P3_00, 3, 0);
 impl_pin!(P3_01, 3, 1);
