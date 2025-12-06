@@ -377,6 +377,9 @@ embassy_hal_internal::peripherals! {
     P0_04,
     P0_05,
     P0_06,
+    P0_07,
+    P0_08,
+    P0_09,
 
     // GPIO port 1
     P1_00,
@@ -410,6 +413,7 @@ embassy_hal_internal::peripherals! {
     P1_28,
     P1_29,
     P1_30,
+    P1_31,
 
 
     // GPIO port 2
@@ -424,6 +428,21 @@ embassy_hal_internal::peripherals! {
     P2_08,
     P2_09,
     P2_10,
+    
+    // GPIO port 3
+    P3_00,
+    P3_01,
+    P3_02,
+    P3_03,
+    P3_04,
+    P3_05,
+    P3_06,
+    P3_07,
+    P3_08,
+    P3_09,
+    P3_10,
+    P3_11,
+    P3_12,
 
     // GRTC
     GRTC_CH0,
@@ -504,6 +523,9 @@ impl_pin!(P0_03, 0, 3);
 impl_pin!(P0_04, 0, 4);
 impl_pin!(P0_05, 0, 5);
 impl_pin!(P0_06, 0, 6);
+impl_pin!(P0_07, 0, 7);
+impl_pin!(P0_08, 0, 8);
+impl_pin!(P0_09, 0, 9);
 
 impl_pin!(P1_00, 1, 0);
 impl_pin!(P1_01, 1, 1);
@@ -536,6 +558,7 @@ impl_pin!(P1_27, 1, 27);
 impl_pin!(P1_28, 1, 28);
 impl_pin!(P1_29, 1, 29);
 impl_pin!(P1_30, 1, 30);
+impl_pin!(P1_31, 1, 31);
 
 impl_pin!(P2_00, 2, 0);
 impl_pin!(P2_01, 2, 1);
@@ -548,6 +571,21 @@ impl_pin!(P2_07, 2, 7);
 impl_pin!(P2_08, 2, 8);
 impl_pin!(P2_09, 2, 9);
 impl_pin!(P2_10, 2, 10);
+
+
+impl_pin!(P3_00, 3, 0);
+impl_pin!(P3_01, 3, 1);
+impl_pin!(P3_02, 3, 2);
+impl_pin!(P3_03, 3, 3);
+impl_pin!(P3_04, 3, 4);
+impl_pin!(P3_05, 3, 5);
+impl_pin!(P3_06, 3, 6);
+impl_pin!(P3_07, 3, 7);
+impl_pin!(P3_08, 3, 8);
+impl_pin!(P3_09, 3, 9);
+impl_pin!(P3_10, 3, 10);
+impl_pin!(P3_11, 3, 11);
+impl_pin!(P3_12, 3, 12);
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "gpiote")] {
