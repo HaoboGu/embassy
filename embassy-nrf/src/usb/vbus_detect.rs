@@ -248,6 +248,15 @@ impl VbusDetect for &SoftwareVbusDetect {
 #[cfg(feature = "_nrf54lm20-app")]
 fn initial_vbus_detected() -> bool {
     unsafe {
+        // Nordic's nRF54LM20 SDK does not currently expose this VREGUSB status
+        // word as a named register in the generated SVD/types for this chip.
+        // However, Nordic's USBHS driver uses the same raw `VREGUSB + 0x400,
+        // BIT(2)` read as a startup fallback after `TASKS_START`, because
+        // `EVENTS_VBUSDETECTED` is not always generated for the initial state.
+        //
+        // Use this hidden status word only to seed the initial VBUS state. Live
+        // VBUS state is tracked from VBUSDETECTED/VBUSREMOVED events, matching
+        // Nordic's runtime behavior.
         ((USB_REG_PERI.as_ptr() as *const u32).add(0x400 / 4).read_volatile() & VREGUSB_STATUS_VBUS_DETECTED) != 0
     }
 }

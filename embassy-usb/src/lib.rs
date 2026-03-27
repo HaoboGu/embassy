@@ -47,7 +47,10 @@ pub enum UsbDeviceState {
     /// The USB device is disabled.
     Disabled,
 
-    /// The USB device has just been enabled or reset.
+    /// Attached with VBUS present, before bus reset.
+    Powered,
+
+    /// The USB device has just been reset, the device responds at the default address.
     Default,
 
     /// The USB device has received an address from the host.
@@ -270,7 +273,7 @@ impl<'d, D: Driver<'d>> UsbDevice<'d, D> {
                 device_state: UsbDeviceState::Unpowered,
                 suspended: false,
                 remote_wakeup_enabled: false,
-                self_powered: false,
+                self_powered: config.self_powered,
                 address: 0,
                 set_address_pending: false,
                 interfaces,
@@ -324,10 +327,13 @@ impl<'d, D: Driver<'d>> UsbDevice<'d, D> {
     /// Disables the USB peripheral.
     pub async fn disable(&mut self) {
         if self.inner.device_state != UsbDeviceState::Disabled {
+            self.inner.clear_suspended();
+            self.inner.clear_remote_wakeup_enabled();
+            self.inner.clear_configuration(true);
+            self.inner.reset_interfaces();
+            self.inner.clear_address_state();
             self.inner.bus.disable().await;
             self.inner.device_state = UsbDeviceState::Disabled;
-            self.inner.suspended = false;
-            self.inner.remote_wakeup_enabled = false;
 
             for h in &mut self.inner.handlers {
                 h.enabled(false);
@@ -472,29 +478,21 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
         match evt {
             Event::Reset => {
                 trace!("usb: reset");
+                self.clear_suspended();
+                self.clear_remote_wakeup_enabled();
+                self.clear_configuration(false);
+                self.clear_address_state();
                 self.device_state = UsbDeviceState::Default;
-                self.suspended = false;
-                self.remote_wakeup_enabled = false;
-                self.address = 0;
 
                 for h in &mut self.handlers {
                     h.reset();
                 }
 
-                for (i, iface) in self.interfaces.iter_mut().enumerate() {
-                    iface.current_alt_setting = 0;
-
-                    for h in &mut self.handlers {
-                        h.set_alternate_setting(InterfaceNumber::new(i as _), 0);
-                    }
-                }
+                self.reset_interfaces();
             }
             Event::Resume => {
                 trace!("usb: resume");
-                self.suspended = false;
-                for h in &mut self.handlers {
-                    h.suspended(false);
-                }
+                self.clear_suspended();
             }
             Event::Suspend => {
                 trace!("usb: suspend");
@@ -506,7 +504,7 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
             Event::PowerDetected => {
                 trace!("usb: power detected");
                 self.bus.enable().await;
-                self.device_state = UsbDeviceState::Default;
+                self.device_state = UsbDeviceState::Powered;
 
                 for h in &mut self.handlers {
                     h.enabled(true);
@@ -514,6 +512,11 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
             }
             Event::PowerRemoved => {
                 trace!("usb: power removed");
+                self.clear_suspended();
+                self.clear_remote_wakeup_enabled();
+                self.clear_configuration(false);
+                self.reset_interfaces();
+                self.clear_address_state();
                 self.bus.disable().await;
                 self.device_state = UsbDeviceState::Unpowered;
 
@@ -530,21 +533,38 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
 
         match (req.request_type, req.recipient) {
             (RequestType::Standard, Recipient::Device) => match (req.request, req.value) {
-                (Request::CLEAR_FEATURE, Request::FEATURE_DEVICE_REMOTE_WAKEUP) => {
-                    self.remote_wakeup_enabled = false;
-                    for h in &mut self.handlers {
-                        h.remote_wakeup_enabled(false);
-                    }
+                (Request::CLEAR_FEATURE, Request::FEATURE_DEVICE_REMOTE_WAKEUP)
+                    if self.config.supports_remote_wakeup
+                        && matches!(
+                            self.device_state,
+                            UsbDeviceState::Addressed | UsbDeviceState::Configured
+                        ) =>
+                {
+                    // USB 2.0 §§9.1.1.6, 9.4.1, and 9.4.5: remote wakeup is host-controlled and
+                    // reported in GET_STATUS(DEVICE); CLEAR_FEATURE is valid in Address/Configured.
+                    self.clear_remote_wakeup_enabled();
                     OutResponse::Accepted
                 }
-                (Request::SET_FEATURE, Request::FEATURE_DEVICE_REMOTE_WAKEUP) => {
+                (Request::SET_FEATURE, Request::FEATURE_DEVICE_REMOTE_WAKEUP)
+                    if self.config.supports_remote_wakeup
+                        && matches!(
+                            self.device_state,
+                            UsbDeviceState::Addressed | UsbDeviceState::Configured
+                        ) =>
+                {
+                    // USB 2.0 §§9.1.1.6, 9.4.5, and 9.4.9: remote wakeup is disabled by default
+                    // and may be enabled by the host with SET_FEATURE in Address/Configured.
                     self.remote_wakeup_enabled = true;
                     for h in &mut self.handlers {
                         h.remote_wakeup_enabled(true);
                     }
                     OutResponse::Accepted
                 }
-                (Request::SET_ADDRESS, addr @ 1..=127) => {
+                (Request::SET_ADDRESS, addr @ 1..=127)
+                    if matches!(self.device_state, UsbDeviceState::Default | UsbDeviceState::Addressed) =>
+                {
+                    // USB 2.0 §9.4.6: SET_ADDRESS with a non-zero value moves Default->Address and
+                    // updates the address while remaining in Address.
                     self.address = addr as u8;
                     self.set_address_pending = true;
                     self.device_state = UsbDeviceState::Addressed;
@@ -553,17 +573,29 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
                     }
                     OutResponse::Accepted
                 }
-                (Request::SET_CONFIGURATION, CONFIGURATION_VALUE_U16) => {
+                (Request::SET_CONFIGURATION, CONFIGURATION_VALUE_U16)
+                    if matches!(
+                        self.device_state,
+                        UsbDeviceState::Addressed | UsbDeviceState::Configured
+                    ) =>
+                {
+                    let was_configured = self.device_state == UsbDeviceState::Configured;
+                    if was_configured {
+                        // Reconfigure
+                        self.clear_configuration(false);
+                    }
+
+                    // Reapply the default alternate settings and endpoint enablement for the
+                    // selected configuration. 
+                    // TODO: USB 2.0 spec §9.1.1.5 requires a reset affected endpoint state to defaults, but embassy-usb-driver don't expose this function
+                    self.reset_interfaces();
+                    self.default_endpoints(None);
+
                     debug!("SET_CONFIGURATION: configured");
                     self.device_state = UsbDeviceState::Configured;
 
                     // Enable all endpoints of selected alt settings.
-                    foreach_endpoint(self.config_descriptor, |ep| {
-                        let iface = &self.interfaces[ep.interface.0 as usize];
-                        self.bus
-                            .endpoint_set_enabled(ep.ep_address, iface.current_alt_setting == ep.interface_alt);
-                    })
-                    .unwrap();
+                    self.apply_interface_endpoints(None);
 
                     // Notify handlers.
                     for h in &mut self.handlers {
@@ -572,22 +604,22 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
 
                     OutResponse::Accepted
                 }
-                (Request::SET_CONFIGURATION, CONFIGURATION_NONE_U16) => {
-                    if self.device_state != UsbDeviceState::Default {
+                (Request::SET_CONFIGURATION, CONFIGURATION_NONE_U16)
+                    if matches!(
+                        self.device_state,
+                        UsbDeviceState::Addressed | UsbDeviceState::Configured
+                    ) =>
+                {
+                    let was_configured = self.device_state == UsbDeviceState::Configured;
+                    if was_configured {
+                        // USB 2.0 §9.4.7: SET_CONFIGURATION(0) moves Configured->Address.
                         debug!("SET_CONFIGURATION: unconfigured");
-                        self.device_state = UsbDeviceState::Addressed;
-
-                        // Disable all endpoints.
-                        foreach_endpoint(self.config_descriptor, |ep| {
-                            self.bus.endpoint_set_enabled(ep.ep_address, false);
-                        })
-                        .unwrap();
-
-                        // Notify handlers.
-                        for h in &mut self.handlers {
-                            h.configured(false);
-                        }
+                        self.clear_configuration(false);
+                        self.reset_interfaces();
+                        self.default_endpoints(None);
                     }
+
+                        self.device_state = UsbDeviceState::Addressed;
                     OutResponse::Accepted
                 }
                 _ => OutResponse::Rejected,
@@ -599,7 +631,7 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
                 };
 
                 match req.request {
-                    Request::SET_INTERFACE => {
+                    Request::SET_INTERFACE if self.device_state == UsbDeviceState::Configured => {
                         let new_altsetting = req.value as u8;
 
                         if new_altsetting >= iface.num_alt_settings {
@@ -609,14 +641,13 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
 
                         iface.current_alt_setting = new_altsetting;
 
+                        // Clear HALT and disable this interface's endpoints before enabling the
+                        // new alternate setting.
+                        // USB 2.0 spec §9.1.1.5 requires a reset affected endpoint state to defaults, but embassy-usb-driver don't expose this function
+                        self.default_endpoints(Some(iface_num));
+
                         // Enable/disable EPs of this interface as needed.
-                        foreach_endpoint(self.config_descriptor, |ep| {
-                            if ep.interface == iface_num {
-                                self.bus
-                                    .endpoint_set_enabled(ep.ep_address, iface.current_alt_setting == ep.interface_alt);
-                            }
-                        })
-                        .unwrap();
+                        self.apply_interface_endpoints(Some(iface_num));
 
                         // TODO check it is valid (not out of range)
 
@@ -648,7 +679,13 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
     fn handle_control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> InResponse<'a> {
         match (req.request_type, req.recipient) {
             (RequestType::Standard, Recipient::Device) => match req.request {
-                Request::GET_STATUS => {
+                Request::GET_STATUS
+                    if matches!(
+                        self.device_state,
+                        UsbDeviceState::Addressed | UsbDeviceState::Configured
+                    ) =>
+                {
+                    // USB 2.0 §9.4.5: GET_STATUS(DEVICE) is defined in Address/Configured.
                     let mut status: u16 = 0x0000;
                     if self.self_powered {
                         status |= 0x0001;
@@ -660,7 +697,14 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
                     InResponse::Accepted(&buf[..2])
                 }
                 Request::GET_DESCRIPTOR => self.handle_get_descriptor(req, buf),
-                Request::GET_CONFIGURATION => {
+                Request::GET_CONFIGURATION
+                    if matches!(
+                        self.device_state,
+                        UsbDeviceState::Addressed | UsbDeviceState::Configured
+                    ) =>
+                {
+                    // USB 2.0 §9.4.2: GET_CONFIGURATION returns zero in Address and the selected
+                    // non-zero configuration value in Configured.
                     let status = match self.device_state {
                         UsbDeviceState::Configured => CONFIGURATION_VALUE,
                         _ => CONFIGURATION_NONE,
@@ -676,12 +720,14 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
                 };
 
                 match req.request {
-                    Request::GET_STATUS => {
+                    Request::GET_STATUS if self.device_state == UsbDeviceState::Configured => {
+                        // USB 2.0 §§9.4.4 and 9.4.5: interface requests are valid only in Configured.
                         let status: u16 = 0;
                         buf[..2].copy_from_slice(&status.to_le_bytes());
                         InResponse::Accepted(&buf[..2])
                     }
-                    Request::GET_INTERFACE => {
+                    Request::GET_INTERFACE if self.device_state == UsbDeviceState::Configured => {
+                        // USB 2.0 §9.4.4: GET_INTERFACE is valid only in Configured.
                         buf[0] = iface.current_alt_setting;
                         InResponse::Accepted(&buf[..1])
                     }
@@ -804,6 +850,74 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
             _ => InResponse::Rejected,
         }
     }
+
+    fn clear_suspended(&mut self) {
+        if self.suspended {
+            self.suspended = false;
+            for h in &mut self.handlers {
+                h.suspended(false);
+            }
+        }
+    }
+
+    fn clear_remote_wakeup_enabled(&mut self) {
+        if self.remote_wakeup_enabled {
+            self.remote_wakeup_enabled = false;
+            for h in &mut self.handlers {
+                h.remote_wakeup_enabled(false);
+            }
+        }
+    }
+
+    fn clear_address_state(&mut self) {
+        self.address = 0;
+        self.set_address_pending = false;
+    }
+
+    fn clear_configuration(&mut self, disable_endpoints: bool) {
+        if self.device_state == UsbDeviceState::Configured {
+            if disable_endpoints {
+                let _ = foreach_endpoint(self.config_descriptor, |ep| {
+                    self.bus.endpoint_set_enabled(ep.ep_address, false);
+                });
+            }
+
+            for h in &mut self.handlers {
+                h.configured(false);
+            }
+        }
+    }
+
+    fn reset_interfaces(&mut self) {
+        for iface in &mut self.interfaces {
+            iface.current_alt_setting = 0;
+        }
+    }
+
+    fn default_endpoints(&mut self, iface_filter: Option<InterfaceNumber>) {
+        foreach_endpoint(self.config_descriptor, |ep| {
+            if iface_filter.map_or(true, |iface| ep.interface == iface) {
+                // USB 2.0 §9.4.5: SetConfiguration/SetInterface clear ENDPOINT_HALT.
+                self.bus.endpoint_set_stalled(ep.ep_address, false);
+                // Here we just disable the endpoints.
+                // TODO: USB 2.0 §9.1.1.5: reconfiguration requires to restore endpoint to defaults, including DATA0.
+                self.bus.endpoint_set_enabled(ep.ep_address, false);
+            }
+        })
+        .unwrap();
+    }
+
+    fn apply_interface_endpoints(&mut self, iface_filter: Option<InterfaceNumber>) {
+        foreach_endpoint(self.config_descriptor, |ep| {
+            if iface_filter.map_or(true, |iface| ep.interface == iface) {
+                let iface = &self.interfaces[ep.interface.0 as usize];
+                self.bus
+                    .endpoint_set_enabled(ep.ep_address, iface.current_alt_setting == ep.interface_alt);
+            }
+        })
+        .unwrap();
+    }
+
 }
 
 fn first_last<T: Iterator>(iter: T) -> impl Iterator<Item = (bool, bool, T::Item)> {
