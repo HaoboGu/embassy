@@ -220,6 +220,7 @@ impl<'d, V: VbusDetect> embassy_usb_driver::Bus for Bus<'d, V> {
             w.set_phy(false);
         });
         self.stop_xo24m();
+        self.inner.inited = false;
         self.enabled = false;
         self.core_ready = false;
     }
