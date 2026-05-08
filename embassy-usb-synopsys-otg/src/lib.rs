@@ -293,6 +293,15 @@ pub struct State<const EP_COUNT: usize> {
     cp_state: ControlPipeSetupState,
     ep_states: [EpState; EP_COUNT],
     bus_waker: AtomicWaker,
+    /// Set to `true` once [`Bus::init_device`] has powered/initialized the OTG core.
+    ///
+    /// Endpoint and control-pipe futures consult this before touching peripheral
+    /// registers so they don't read an unpowered core. On some SoCs (e.g.
+    /// nRF54LM20 USBHS) the OTG core sits in a domain that is unpowered until
+    /// VBUS is detected; reading registers in that state stalls the AHB
+    /// indefinitely. STM32 cores share a clock with the AHB and ignore reads
+    /// before init, so this gate is a no-op for them.
+    core_ready: AtomicBool,
 }
 
 unsafe impl<const EP_COUNT: usize> Send for State<EP_COUNT> {}
@@ -315,6 +324,7 @@ impl<const EP_COUNT: usize> State<EP_COUNT> {
                 }
             }; EP_COUNT],
             bus_waker: AtomicWaker::new(),
+            core_ready: AtomicBool::new(false),
         }
     }
 }
@@ -495,6 +505,7 @@ impl<'d, const MAX_EP_COUNT: usize> Driver<'d, MAX_EP_COUNT> {
             _phantom: PhantomData,
             regs: self.instance.regs,
             state,
+            core_ready: &self.instance.state.core_ready,
             info: EndpointInfo {
                 addr: EndpointAddress::from_parts(index, D::dir()),
                 ep_type,
@@ -899,6 +910,13 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
         if !self.inited {
             self.init();
             self.inited = true;
+            // Publish that registers are now safe to read, then wake any
+            // endpoint or control-pipe future that parked in `wait_core_ready`.
+            self.instance.state.core_ready.store(true, Ordering::Release);
+            for ep in &self.instance.state.ep_states[..self.instance.endpoint_count] {
+                ep.in_waker.wake();
+                ep.out_waker.wake();
+            }
         }
     }
 
@@ -906,6 +924,7 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
     pub fn deinit_device(&mut self) {
         if self.inited {
             self.inited = false;
+            self.instance.state.core_ready.store(false, Ordering::Release);
         }
     }
 }
@@ -1195,6 +1214,33 @@ pub struct Endpoint<'d, D> {
     regs: Otg,
     info: EndpointInfo,
     state: &'d EpState,
+    /// Shared with [`Bus`] via [`State`]. Endpoint operations read this before
+    /// touching peripheral registers so they don't access an unpowered core.
+    core_ready: &'d AtomicBool,
+}
+
+impl<'d, D> Endpoint<'d, D> {
+    /// Suspend until [`Bus::init_device`] reports the OTG core is initialized.
+    ///
+    /// All endpoint futures call this before reading peripheral registers.
+    /// Required for chips that hold the core in an unpowered state until VBUS
+    /// is detected (e.g. nRF54LM20 USBHS), where reading any register would
+    /// otherwise stall the AHB.
+    async fn wait_core_ready(&self, in_waker: bool) {
+        poll_fn(|cx| {
+            if in_waker {
+                self.state.in_waker.register(cx.waker());
+            } else {
+                self.state.out_waker.register(cx.waker());
+            }
+            if self.core_ready.load(Ordering::Acquire) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
+    }
 }
 
 impl<'d> embassy_usb_driver::Endpoint for Endpoint<'d, In> {
@@ -1203,6 +1249,7 @@ impl<'d> embassy_usb_driver::Endpoint for Endpoint<'d, In> {
     }
 
     async fn wait_enabled(&mut self) {
+        self.wait_core_ready(true).await;
         poll_fn(|cx| {
             let ep_index = self.info.addr.index();
 
@@ -1224,6 +1271,7 @@ impl<'d> embassy_usb_driver::Endpoint for Endpoint<'d, Out> {
     }
 
     async fn wait_enabled(&mut self) {
+        self.wait_core_ready(false).await;
         poll_fn(|cx| {
             let ep_index = self.info.addr.index();
 
@@ -1242,6 +1290,8 @@ impl<'d> embassy_usb_driver::Endpoint for Endpoint<'d, Out> {
 impl<'d> embassy_usb_driver::EndpointOut for Endpoint<'d, Out> {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, EndpointError> {
         trace!("read start len={}", buf.len());
+
+        self.wait_core_ready(false).await;
 
         poll_fn(|cx| {
             let index = self.info.addr.index();
@@ -1313,6 +1363,8 @@ impl<'d> embassy_usb_driver::EndpointIn for Endpoint<'d, In> {
         if buf.len() > self.info.max_packet_size as usize {
             return Err(EndpointError::BufferOverflow);
         }
+
+        self.wait_core_ready(true).await;
 
         let index = self.info.addr.index();
         // Wait for previous transfer to complete and check if endpoint is disabled
@@ -1496,6 +1548,8 @@ impl<'d> embassy_usb_driver::ControlPipe for ControlPipe<'d> {
     async fn reject(&mut self) {
         trace!("control: reject");
 
+        self.ep_out.wait_core_ready(false).await;
+
         // EP0 should not be controlled by `Bus` so this RMW does not need a critical section
         self.regs.diepctl(self.ep_in.info.addr.index()).modify(|w| {
             w.set_stall(true);
@@ -1507,6 +1561,9 @@ impl<'d> embassy_usb_driver::ControlPipe for ControlPipe<'d> {
 
     async fn accept_set_address(&mut self, addr: u8) {
         trace!("setting addr: {}", addr);
+
+        self.ep_out.wait_core_ready(false).await;
+
         critical_section::with(|_| {
             self.regs.dcfg().modify(|w| {
                 w.set_dad(addr);
