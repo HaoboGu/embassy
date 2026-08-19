@@ -53,9 +53,9 @@ impl<'d, D: Driver<'d>, const MTU: usize> Runner<'d, D, MTU> {
                 state_chan.set_link_state(LinkState::Up);
 
                 loop {
-                    let mut p = rx_chan.rx_buf().await;
-                    match self.rx_usb.read_packet(&mut p).await {
-                        Ok(n) => p.rx_done(n),
+                    let p = rx_chan.rx_buf().await;
+                    match self.rx_usb.read_packet(p).await {
+                        Ok(n) => rx_chan.rx_done(n),
                         Err(e) => {
                             warn!("error reading packet: {:?}", e);
                             break;
@@ -67,10 +67,10 @@ impl<'d, D: Driver<'d>, const MTU: usize> Runner<'d, D, MTU> {
         let tx_fut = async move {
             loop {
                 let p = tx_chan.tx_buf().await;
-                if let Err(e) = self.tx_usb.write_packet(&p).await {
+                if let Err(e) = self.tx_usb.write_packet(p).await {
                     warn!("Failed to TX packet: {:?}", e);
                 }
-                p.tx_done();
+                tx_chan.tx_done();
             }
         };
         match select(rx_fut, tx_fut).await {
