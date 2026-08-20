@@ -5,40 +5,30 @@ use core::future::poll_fn;
 use core::marker::PhantomData;
 use core::task::Poll;
 
-use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, RawMutex};
 use embassy_sync::waitqueue::AtomicWaker;
 use embassy_usb_driver::host::{
-    DeviceEvent, HostError, PipeError, SplitInfo, SplitSpeed, UsbHostAllocator, UsbHostController, UsbPipe, pipe,
+    DeviceEvent, HostError, PipeError, SplitInfo, UsbHostAllocator, UsbHostController, UsbPipe, pipe,
 };
 use embassy_usb_driver::{EndpointInfo, EndpointType, Speed};
-use portable_atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
+use portable_atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::PhyType;
 use crate::otg_v1::{Otg, vals};
 
-// Per-channel event flags, OR'd into an AtomicU16 mailbox by the ISR.
-const EV_XFRC: u16 = 1 << 0;
-const EV_STALL: u16 = 1 << 1;
-const EV_NAK: u16 = 1 << 2;
-const EV_NYET: u16 = 1 << 3;
-const EV_TXERR: u16 = 1 << 4;
-const EV_BBERR: u16 = 1 << 5;
-const EV_FRMOR: u16 = 1 << 6;
-const EV_DTERR: u16 = 1 << 7;
-const EV_CHH: u16 = 1 << 8;
-const EV_DISCONNECT: u16 = 1 << 9;
+// Channel transfer result codes stored atomically.
+const CH_RESULT_NONE: u8 = 0;
+const CH_RESULT_COMPLETE: u8 = 1;
+const CH_RESULT_STALL: u8 = 2;
+const CH_RESULT_NAK: u8 = 3;
+const CH_RESULT_TXERR: u8 = 4;
+const CH_RESULT_BBERR: u8 = 5;
+const CH_RESULT_FRMOR: u8 = 6;
+const CH_RESULT_DTERR: u8 = 7;
+const CH_RESULT_HALTED: u8 = 8;
+const CH_RESULT_NYET: u8 = 9;
 
 /// HCINT.NYET bit (not exposed by the PAC struct).
 const HCINT_NYET_MASK: u32 = 1 << 6;
-
-enum ChannelEvent {
-    None,
-    Complete,
-    Nak,
-    Nyet,
-    Halted,
-    Error(PipeError),
-}
 
 // Port event bitflags (OR'd together, not mutually exclusive).
 const PORT_EVENT_CONNECTED: u8 = 1 << 0;
@@ -49,8 +39,7 @@ const PORT_EVENT_OVERCURRENT: u8 = 1 << 3;
 /// Per-channel state for interrupt communication.
 struct ChannelState {
     waker: AtomicWaker,
-    /// Accumulated `EV_*` event flags.
-    result: AtomicU16,
+    result: AtomicU8,
     /// Buffer pointer for RX FIFO reads.
     rx_buffer: UnsafeCell<*mut u8>,
     /// Number of bytes received into the buffer.
@@ -68,29 +57,23 @@ struct HostStateFields {
     port_waker: AtomicWaker,
     port_event: AtomicU8,
     port_speed: AtomicU8,
+    inited: AtomicBool,
 }
 
 /// Storage object for USB host driver state. Create one per OTG instance.
-pub struct HostStateStorage<const CH_COUNT: usize, M = CriticalSectionRawMutex>
-where
-    M: RawMutex + Copy,
-{
+pub struct HostStateStorage<const CH_COUNT: usize> {
     channels: [ChannelState; CH_COUNT],
     fields: HostStateFields,
-    mutex: M,
 }
 
-impl<const CH_COUNT: usize, M> HostStateStorage<CH_COUNT, M>
-where
-    M: RawMutex + Copy,
-{
+impl<const CH_COUNT: usize> HostStateStorage<CH_COUNT> {
     /// Create a new host state.
-    pub const fn new(mutex: M) -> Self {
+    pub const fn new() -> Self {
         Self {
             channels: [const {
                 ChannelState {
                     waker: AtomicWaker::new(),
-                    result: AtomicU16::new(0),
+                    result: AtomicU8::new(CH_RESULT_NONE),
                     rx_buffer: UnsafeCell::new(core::ptr::null_mut()),
                     rx_count: UnsafeCell::new(0),
                     rx_capacity: UnsafeCell::new(0),
@@ -101,17 +84,16 @@ where
                 port_waker: AtomicWaker::new(),
                 port_event: AtomicU8::new(0),
                 port_speed: AtomicU8::new(0),
+                inited: AtomicBool::new(false),
             },
-            mutex,
         }
     }
 
     /// Borrow this [`HostStateStorage`] as a [`HostState`] for [`OtgHostInstance`].
-    pub fn as_host_state(&self) -> HostState<'_, M> {
+    pub fn as_host_state(&self) -> HostState<'_> {
         HostState {
             channels: self.channels.as_slice(),
             fields: &self.fields,
-            mutex: &self.mutex,
         }
     }
 }
@@ -119,34 +101,13 @@ where
 /// Type-erased view of [`HostState`] for [`OtgHostInstance`], [`OtgHost`], [`on_host_interrupt`], and pipes.
 ///
 /// Build from [`HostState::as_host_state`].
-pub struct HostState<'d, M = CriticalSectionRawMutex>
-where
-    M: RawMutex + Copy,
-{
+#[derive(Clone, Copy)]
+pub struct HostState<'d> {
     channels: &'d [ChannelState],
     fields: &'d HostStateFields,
-    mutex: &'d M,
 }
 
-impl<'d, M> Clone for HostState<'d, M>
-where
-    M: RawMutex + Copy,
-{
-    fn clone(&self) -> Self {
-        Self {
-            channels: self.channels,
-            fields: self.fields,
-            mutex: self.mutex,
-        }
-    }
-}
-
-impl<'d, M> Copy for HostState<'d, M> where M: RawMutex + Copy {}
-
-impl<'d, M> HostState<'d, M>
-where
-    M: RawMutex + Copy,
-{
+impl HostState<'_> {
     /// Returns the number of host channels supported by this state.
     pub fn channel_count(&self) -> usize {
         self.channels.len()
@@ -155,14 +116,11 @@ where
 
 /// Hardware-dependent host configuration.
 #[derive(Copy, Clone)]
-pub struct OtgHostInstance<'d, M = CriticalSectionRawMutex>
-where
-    M: RawMutex + Copy,
-{
+pub struct OtgHostInstance<'d> {
     /// The USB peripheral registers.
     pub regs: Otg,
     /// Shared host driver state from [`HostState::as_host_state`].
-    pub state: HostState<'d, M>,
+    pub state: HostState<'d>,
     /// FIFO depth in words.
     pub fifo_depth_words: u16,
     /// The PHY type.
@@ -173,10 +131,7 @@ where
 ///
 /// # Safety
 /// Must be called from the USB OTG interrupt handler when the controller is in host mode.
-pub unsafe fn on_host_interrupt<M>(r: Otg, state: &HostState<'_, M>)
-where
-    M: RawMutex + Copy,
-{
+pub unsafe fn on_host_interrupt(r: Otg, state: &HostState<'_>) {
     let gintsts = r.gintsts().read();
     let ch_count = state.channels.len();
 
@@ -354,46 +309,36 @@ where
             if haint & (1 << ch) != 0 {
                 let hcint = r.hcint(ch).read();
 
-                // Accumulate every bit; NAK and the auto-halt CHH can co-occur.
-                let mut events: u16 = 0;
-                if hcint.xfrc() {
-                    events |= EV_XFRC;
-                }
-                if hcint.stall() {
-                    events |= EV_STALL;
-                }
-                if hcint.bberr() {
-                    events |= EV_BBERR;
-                }
-                if hcint.txerr() {
-                    events |= EV_TXERR;
-                }
-                if hcint.dterr() {
-                    events |= EV_DTERR;
-                }
-                if hcint.frmor() {
-                    events |= EV_FRMOR;
-                }
-                if hcint.0 & HCINT_NYET_MASK != 0 {
-                    events |= EV_NYET;
-                }
-                if hcint.nak() {
-                    events |= EV_NAK;
-                }
-                if hcint.chh() {
-                    events |= EV_CHH;
-                }
+                let nyet = hcint.0 & HCINT_NYET_MASK != 0;
+                let result = if hcint.xfrc() {
+                    CH_RESULT_COMPLETE
+                } else if hcint.stall() {
+                    CH_RESULT_STALL
+                } else if hcint.bberr() {
+                    CH_RESULT_BBERR
+                } else if hcint.txerr() {
+                    CH_RESULT_TXERR
+                } else if hcint.dterr() {
+                    CH_RESULT_DTERR
+                } else if hcint.frmor() {
+                    CH_RESULT_FRMOR
+                } else if nyet {
+                    CH_RESULT_NYET
+                } else if hcint.nak() {
+                    CH_RESULT_NAK
+                } else if hcint.chh() {
+                    CH_RESULT_HALTED
+                } else {
+                    CH_RESULT_NONE
+                };
 
-                trace!(
-                    "otg-host: hcint ch={} raw={:#010x} -> events={:#06x}",
-                    ch, hcint.0, events
-                );
+                trace!("otg-host: hcint ch={} raw={:#010x} -> result={}", ch, hcint.0, result,);
 
                 // Clear all channel interrupts
                 r.hcint(ch).write_value(hcint);
 
-                if events != 0 {
-                    state.channels[ch].result.fetch_or(events, Ordering::Release);
+                if result != CH_RESULT_NONE {
+                    state.channels[ch].result.store(result, Ordering::Release);
                     state.channels[ch].waker.wake();
                 }
             }
@@ -432,24 +377,14 @@ fn hprt_read_safe(r: Otg) -> u32 {
 }
 
 /// USB OTG Host Driver.
-pub struct OtgHost<'d, M = CriticalSectionRawMutex>
-where
-    M: RawMutex + Copy,
-{
-    instance: OtgHostInstance<'d, M>,
-    inited: bool,
+pub struct OtgHost<'d> {
+    instance: OtgHostInstance<'d>,
 }
 
-impl<'d, M> OtgHost<'d, M>
-where
-    M: RawMutex + Copy,
-{
+impl<'d> OtgHost<'d> {
     /// Create a new OTG host driver.
-    pub fn new(instance: OtgHostInstance<'d, M>) -> Self {
-        Self {
-            instance,
-            inited: false,
-        }
+    pub fn new(instance: OtgHostInstance<'d>) -> Self {
+        Self { instance }
     }
 
     async fn configure_as_host(&self) {
@@ -530,7 +465,7 @@ where
         let nptx_size = total / 4;
         let ptx_size = total - rx_size - nptx_size;
 
-        self.instance.state.mutex.lock(|| {
+        critical_section::with(|_| {
             r.grxfsiz().modify(|w| w.set_rxfd(rx_size));
 
             // Non-periodic TX FIFO (used for control and bulk OUT)
@@ -590,56 +525,34 @@ where
 /// Obtained from [`UsbHostController::allocator`]. Holds only `Copy` handles
 /// to the controller's `'d`-borrowed state, so it can be freely copied and
 /// retained by class drivers independently of the controller's `&mut` borrow.
-pub struct OtgHostAllocator<'d, M = CriticalSectionRawMutex>
-where
-    M: RawMutex + Copy,
-{
+pub struct OtgHostAllocator<'d> {
     regs: Otg,
-    state: HostState<'d, M>,
+    state: HostState<'d>,
 }
 
-impl<'d, M> Clone for OtgHostAllocator<'d, M>
-where
-    M: RawMutex + Copy,
-{
+impl<'d> Clone for OtgHostAllocator<'d> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'d, M> Copy for OtgHostAllocator<'d, M> where M: RawMutex + Copy {}
+impl<'d> Copy for OtgHostAllocator<'d> {}
 
-impl<'d, M> UsbHostAllocator<'d> for OtgHostAllocator<'d, M>
-where
-    M: RawMutex + Copy,
-{
-    type Pipe<T: pipe::Type, D: pipe::Direction> = Channel<'d, T, D, M>;
+impl<'d> UsbHostAllocator<'d> for OtgHostAllocator<'d> {
+    type Pipe<T: pipe::Type, D: pipe::Direction> = Channel<'d, T, D>;
 
     fn alloc_pipe<T: pipe::Type, D: pipe::Direction>(
         &self,
         addr: u8,
         endpoint: &EndpointInfo,
-        split: Option<SplitInfo>,
+        _split: Option<SplitInfo>,
     ) -> Result<Self::Pipe<T, D>, HostError> {
         let ep_number = endpoint.addr.index() as u8;
         let max_packet_size = endpoint.max_packet_size;
 
-        // Read root-port speed from port_speed atomic (stored by ISR)
+        // Read device speed from port_speed atomic (stored by ISR)
         let speed_code = self.state.fields.port_speed.load(Ordering::Acquire);
-
-        let is_low_speed = match split {
-            // Behind a hub the root port reports the *hub's* speed, so the
-            // target device's speed has to come from the split metadata.
-            Some(_) if speed_code == 2 => {
-                // A high-speed root port reaches LS/FS devices only through
-                // real split transactions (HCSPLT plus start/complete-split
-                // scheduling), which this driver does not implement. Fail
-                // loudly instead of emitting tokens the device can't see.
-                return Err(HostError::Other("high-speed split transactions not supported"));
-            }
-            Some(split) => split.device_speed() == SplitSpeed::Low,
-            None => speed_code == 1,
-        };
+        let is_low_speed = speed_code == 1;
 
         let max_ch = self.state.channels.len();
         // Find a free channel using atomic CAS
@@ -649,7 +562,7 @@ where
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
-                self.state.channels[i].result.store(0, Ordering::Release);
+                self.state.channels[i].result.store(CH_RESULT_NONE, Ordering::Release);
 
                 return Ok(Channel {
                     regs: self.regs,
@@ -669,11 +582,8 @@ where
     }
 }
 
-impl<'d, M> UsbHostController<'d> for OtgHost<'d, M>
-where
-    M: RawMutex + Copy,
-{
-    type Allocator = OtgHostAllocator<'d, M>;
+impl<'d> UsbHostController<'d> for OtgHost<'d> {
+    type Allocator = OtgHostAllocator<'d>;
 
     fn allocator(&self) -> Self::Allocator {
         OtgHostAllocator {
@@ -684,10 +594,10 @@ where
 
     async fn wait_for_device_event(&mut self) -> DeviceEvent {
         // Lazily initialize the host hardware on first call.
-        if !self.inited {
+        if !self.instance.state.fields.inited.load(Ordering::Acquire) {
             self.configure_as_host().await;
             self.init_host();
-            self.inited = true;
+            self.instance.state.fields.inited.store(true, Ordering::Release);
         }
 
         loop {
@@ -713,7 +623,7 @@ where
                     // Wake all channels to signal disconnection
                     for ch in state.channels {
                         if ch.allocated.load(Ordering::Relaxed) {
-                            ch.result.fetch_or(EV_DISCONNECT, Ordering::Release);
+                            ch.result.store(CH_RESULT_HALTED, Ordering::Release);
                             ch.waker.wake();
                         }
                     }
@@ -758,7 +668,7 @@ where
                         .fetch_and(!PORT_EVENT_DISCONNECTED, Ordering::AcqRel);
                     for ch in state.channels {
                         if ch.allocated.load(Ordering::Relaxed) {
-                            ch.result.fetch_or(EV_DISCONNECT, Ordering::Release);
+                            ch.result.store(CH_RESULT_HALTED, Ordering::Release);
                             ch.waker.wake();
                         }
                     }
@@ -877,14 +787,9 @@ where
 /// A USB host channel for performing transfers.
 ///
 /// The channel is automatically released when dropped.
-pub struct Channel<'d, T, D, M = CriticalSectionRawMutex>
-where
-    T: pipe::Type,
-    D: pipe::Direction,
-    M: RawMutex + Copy,
-{
+pub struct Channel<'d, T: pipe::Type, D: pipe::Direction> {
     regs: Otg,
-    state: HostState<'d, M>,
+    state: HostState<'d>,
     index: usize,
     device_address: u8,
     ep_number: u8,
@@ -895,20 +800,9 @@ where
 }
 
 // SAFETY: Channel only accesses its own state in the shared HostState.
-unsafe impl<T, D, M> Send for Channel<'_, T, D, M>
-where
-    T: pipe::Type,
-    D: pipe::Direction,
-    M: RawMutex + Copy,
-{
-}
+unsafe impl<T: pipe::Type, D: pipe::Direction> Send for Channel<'_, T, D> {}
 
-impl<T, D, M> Drop for Channel<'_, T, D, M>
-where
-    T: pipe::Type,
-    D: pipe::Direction,
-    M: RawMutex + Copy,
-{
+impl<T: pipe::Type, D: pipe::Direction> Drop for Channel<'_, T, D> {
     fn drop(&mut self) {
         let r = self.regs;
         let ch = self.index;
@@ -927,7 +821,7 @@ where
 
         // Mask this channel's interrupt so the ISR won't deliver stale
         // results to whatever gets allocated at this index next.
-        self.state.mutex.lock(|| {
+        critical_section::with(|_| {
             r.haintmsk().modify(|w| {
                 w.set_haintm(w.haintm() & !(1 << ch));
             });
@@ -936,17 +830,12 @@ where
         // Clear any pending channel interrupts.
         r.hcint(ch).write_value(crate::otg_v1::regs::Hcint(0xFFFF_FFFF));
 
-        self.state.channels[ch].result.store(0, Ordering::Release);
+        self.state.channels[ch].result.store(CH_RESULT_NONE, Ordering::Release);
         self.state.channels[ch].allocated.store(false, Ordering::Release);
     }
 }
 
-impl<T, D, M> Channel<'_, T, D, M>
-where
-    T: pipe::Type,
-    D: pipe::Direction,
-    M: RawMutex + Copy,
-{
+impl<T: pipe::Type, D: pipe::Direction> Channel<'_, T, D> {
     fn configure_channel(&self, dir_in: bool, ep_type: EndpointType, pktcnt: u16, xfrsiz: u32, dpid: u8) {
         let r = self.regs;
         let ch = self.index;
@@ -1029,7 +918,7 @@ where
         });
 
         // Enable this channel in HAINTMSK (critical section guards the RMW against concurrent alloc_pipe)
-        self.state.mutex.lock(|| {
+        critical_section::with(|_| {
             r.haintmsk().modify(|w| {
                 w.set_haintm(w.haintm() | (1 << ch));
             });
@@ -1039,7 +928,7 @@ where
         r.hcint(ch).write_value(crate::otg_v1::regs::Hcint(0xFFFF_FFFF));
 
         // Clear result
-        self.state.channels[ch].result.store(0, Ordering::Release);
+        self.state.channels[ch].result.store(CH_RESULT_NONE, Ordering::Release);
     }
 
     fn enable_channel(&self) {
@@ -1051,22 +940,13 @@ where
         });
     }
 
-    /// Halt and spin until CHENA clears. No-op if already disabled (no CHH would
-    /// be raised, so awaiting one would park forever). Drains any halt CHH.
     fn halt_channel(&self) {
         let r = self.regs;
         let ch = self.index;
-        if r.hcchar(ch).read().chena() {
-            r.hcchar(ch).modify(|w| {
-                w.set_chena(true);
-                w.set_chdis(true);
-            });
-            while r.hcchar(ch).read().chena() {
-                core::hint::spin_loop();
-            }
-        }
-        r.hcint(ch).write_value(crate::otg_v1::regs::Hcint(0xFFFF_FFFF));
-        self.state.channels[ch].result.store(0, Ordering::Release);
+        r.hcchar(ch).modify(|w| {
+            w.set_chena(true);
+            w.set_chdis(true);
+        });
     }
 
     fn write_fifo(&self, data: &[u8]) {
@@ -1109,14 +989,14 @@ where
         unsafe { *self.state.channels[self.index].rx_count.get() }
     }
 
-    async fn wait_for_result(&self) -> u16 {
+    async fn wait_for_result(&self) -> u8 {
         poll_fn(|cx| {
             let ch_state = &self.state.channels[self.index];
             ch_state.waker.register(cx.waker());
 
-            let events = ch_state.result.swap(0, Ordering::AcqRel);
-            if events != 0 {
-                Poll::Ready(events)
+            let result = ch_state.result.swap(CH_RESULT_NONE, Ordering::AcqRel);
+            if result != CH_RESULT_NONE {
+                Poll::Ready(result)
             } else {
                 Poll::Pending
             }
@@ -1124,29 +1004,17 @@ where
         .await
     }
 
-    /// Reduce an event mask to one action, by priority (errors/disconnect win
-    /// over NAK/CHH so a NAK|CHH combo retries instead of reporting disconnect).
-    fn classify_events(events: u16) -> ChannelEvent {
-        if events & EV_DISCONNECT != 0 {
-            ChannelEvent::Error(PipeError::Disconnected)
-        } else if events & EV_STALL != 0 {
-            ChannelEvent::Error(PipeError::Stall)
-        } else if events & EV_DTERR != 0 {
-            ChannelEvent::Error(PipeError::DataToggleError)
-        } else if events & EV_BBERR != 0 {
-            ChannelEvent::Error(PipeError::Babble)
-        } else if events & (EV_TXERR | EV_FRMOR) != 0 {
-            ChannelEvent::Error(PipeError::BadResponse)
-        } else if events & EV_XFRC != 0 {
-            ChannelEvent::Complete
-        } else if events & EV_NYET != 0 {
-            ChannelEvent::Nyet
-        } else if events & EV_NAK != 0 {
-            ChannelEvent::Nak
-        } else if events & EV_CHH != 0 {
-            ChannelEvent::Halted
-        } else {
-            ChannelEvent::None
+    fn result_to_error(result: u8) -> Result<(), PipeError> {
+        match result {
+            CH_RESULT_COMPLETE => Ok(()),
+            CH_RESULT_STALL => Err(PipeError::Stall),
+            CH_RESULT_NAK | CH_RESULT_NYET => Ok(()), // not errors; caller retries
+            CH_RESULT_TXERR => Err(PipeError::BadResponse),
+            CH_RESULT_BBERR => Err(PipeError::Babble),
+            CH_RESULT_FRMOR => Err(PipeError::BadResponse),
+            CH_RESULT_DTERR => Err(PipeError::DataToggleError),
+            CH_RESULT_HALTED => Err(PipeError::Disconnected),
+            _ => Err(PipeError::BadResponse),
         }
     }
 
@@ -1176,19 +1044,19 @@ where
             self.enable_channel();
             self.write_fifo(data);
 
-            let events = self.wait_for_result().await;
-            match Self::classify_events(events) {
-                ChannelEvent::Complete => return Ok(()),
-                ChannelEvent::Nyet => {
+            let result = self.wait_for_result().await;
+            match result {
+                CH_RESULT_COMPLETE => return Ok(()),
+                CH_RESULT_NAK => {
+                    yield_now().await;
+                    continue;
+                }
+                CH_RESULT_NYET => {
                     do_ping = true;
                     yield_now().await;
                     continue;
                 }
-                ChannelEvent::Nak | ChannelEvent::Halted | ChannelEvent::None => {
-                    yield_now().await;
-                    continue;
-                }
-                ChannelEvent::Error(e) => return Err(e),
+                _ => return Self::result_to_error(result),
             }
         }
     }
@@ -1221,22 +1089,29 @@ where
             self.configure_channel(true, ep_type, pktcnt, xfer_size, dpid);
             self.enable_channel();
 
-            let events = self.wait_for_result().await;
+            let result = self.wait_for_result().await;
             let count = self.rx_count();
             self.clear_rx_buffer();
 
-            match Self::classify_events(events) {
-                ChannelEvent::Complete => return Ok(count),
-                ChannelEvent::Nak | ChannelEvent::Nyet | ChannelEvent::Halted | ChannelEvent::None => {
-                    // Periodic channels auto-halt after NAK; settle before retry.
-                    if is_periodic {
-                        self.halt_channel();
-                    }
-                    yield_now().await;
-                    continue;
-                }
-                ChannelEvent::Error(e) => return Err(e),
+            if result == CH_RESULT_COMPLETE {
+                return Ok(count);
             }
+
+            if result == CH_RESULT_NAK {
+                if is_periodic {
+                    // For periodic endpoints, the hardware may start halting the
+                    // channel after NAK. Explicitly halt and wait for completion
+                    // (CHH) before reconfiguring, otherwise the retry races with
+                    // the in-progress halt and the new transfer never starts.
+                    self.halt_channel();
+                    let _halt = self.wait_for_result().await; // expect CHH
+                }
+                yield_now().await;
+                continue;
+            }
+
+            Self::result_to_error(result)?;
+            return Ok(count);
         }
     }
 
@@ -1317,12 +1192,7 @@ where
     }
 }
 
-impl<T, D, M> UsbPipe<T, D> for Channel<'_, T, D, M>
-where
-    T: pipe::Type,
-    D: pipe::Direction,
-    M: RawMutex + Copy,
-{
+impl<T: pipe::Type, D: pipe::Direction> UsbPipe<T, D> for Channel<'_, T, D> {
     async fn control_in(&mut self, setup: &[u8; 8], buf: &mut [u8]) -> Result<usize, PipeError>
     where
         T: pipe::IsControl,
