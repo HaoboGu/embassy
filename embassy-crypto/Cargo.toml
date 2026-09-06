@@ -15,15 +15,15 @@ categories = [
 [package.metadata.embassy_docs]
 src_base = "https://github.com/embassy-rs/embassy/blob/embassy-crypto-driver-v$VERSION/embassy-net-driver/src/"
 src_base_git = "https://github.com/embassy-rs/embassy/blob/$COMMIT/embassy-crypto-driver/src/"
-features = ["defmt", "driver-rustcrypto"]
+features = ["defmt", "driver-sha2", "driver-aes128", "driver-p256-scalar-mul"]
 target = "thumbv7em-none-eabi"
 
 [package.metadata.docs.rs]
-features = ["defmt", "driver-rustcrypto"]
+features = ["defmt", "driver-sha2", "driver-aes128", "driver-p256-scalar-mul"]
 
 [package.metadata.embassy]
 build = [
-    {target = "thumbv7em-none-eabi", features = ["defmt", "driver-rustcrypto"]},
+    {target = "thumbv7em-none-eabi", features = ["defmt", "driver-sha2", "driver-aes128", "driver-p256-scalar-mul"]},
 ]
 
 [dependencies]
@@ -36,7 +36,8 @@ aead = { version = "0.6", default-features = false }
 generic-array = "1.4.5"
 heapless = "0.9"
 
-# RustCrypto software-driver dependencies (all optional)
+# RustCrypto software dependencies, used directly when the corresponding
+# `driver-*` feature is enabled (all optional).
 md-5 = { version = "0.11", default-features = false, optional = true }
 sha1 = { version = "0.11", default-features = false, optional = true }
 sha2 = { version = "0.11", default-features = false, optional = true }
@@ -50,14 +51,13 @@ cmac = { version = "0.8", default-features = false, optional = true }
 
 # P-256: software arithmetic wrapped by the `p256` module (scalar
 # multiplication is delegated to the `P256ScalarMul` driver), and the
-# software fallback driver for that unitrait.
+# software fallback for the `P256Ec` high-level unitrait.
 elliptic-curve = { version = "0.14", default-features = false, features = ["arithmetic", "sec1"], optional = true }
-p256 = { version = "0.14", default-features = false, features = ["arithmetic"], optional = true }
 ecdsa = { version = "0.17", default-features = false, features = ["digest", "algorithm"], optional = true }
 
-# P-384: software arithmetic wrapped by the `p384` module. Pure software for
-# now: there are no P-384 driver traits yet.
+p256 = { version = "0.14", default-features = false, features = ["arithmetic"], optional = true }
 p384 = { version = "0.14", default-features = false, features = ["arithmetic"], optional = true }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"], optional = true }
 
 [dev-dependencies]
 p256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa", "ecdh"] }
@@ -87,14 +87,21 @@ p384-ecdsa = ["p384", "ecdsa", "p384/ecdsa"]
 ## `p384` is enabled.
 pkcs8 = ["ec", "elliptic-curve/pkcs8", "p256?/pkcs8", "p384?/pkcs8"]
 
+## The `driver-*` features below select whether each operation is performed
+## by calling the RustCrypto crate directly (feature ON) or by wrapping the
+## corresponding `embassy-crypto-driver` unitrait (feature OFF).  When a
+## feature is ON the type is a direct alias to the RustCrypto type and no
+## link-time driver is registered for that operation.  When it is OFF the
+## type is a thin wrapper over the unitrait and exactly one crate in the
+## dependency tree must register a driver via the `embassy_crypto_*_impl!`
+## macros, or linking will fail.
+##
+## Composite operations keep the layering: for example, enabling
+## `driver-aes128cbc` but leaving `driver-aes128` off means CBC mode is the
+## RustCrypto `cbc` crate built on top of the unitrait-wrapped `Aes128`, so
+## a hardware ECB accelerator still accelerates CBC.
 
-## Software implementation of the `P256Ec` driver trait via `driver_rustcrypto`
-## (p256 crate underneath). Enables the p256 ECDSA machinery; without it, the
-## `p256_ec` high-level API compiles with no software EC stack, so an asm/HAL
-## backend can serve it — smaller code size for that use case.
-driver-p256-ec = ["p256-ecdsa", "p256/ecdh"]
-
-## Use RustCrypto crates as a software fallback driver.
+## Enable all-rustcrypto drivers
 driver-rustcrypto = [
     "driver-md5",
     "driver-sha1",
@@ -113,7 +120,6 @@ driver-rustcrypto = [
     "driver-aes256ccm",
     "driver-aes128cmac",
     "driver-aes256cmac",
-    "driver-p256-ec",
     "driver-p256-scalar-mul",
     "driver-p256-scalar-invert",
     "driver-p256-lincomb",
@@ -121,6 +127,27 @@ driver-rustcrypto = [
     "driver-p384-scalar-invert",
     "driver-p384-lincomb",
 ]
+
+## Run the high-level asymmetric P-256 API (`asymmetric` module) in software
+## via the `p256` crate, calling RustCrypto directly instead of the `P256Ec`
+## unitrait. Enables the p256 ECDSA machinery; without it, the `p256_ec`
+## high-level API compiles with no software EC stack, so an asm/HAL backend
+## can serve it — smaller code size for that use case.
+driver-p256-ec = ["p256-ecdsa", "p256/ecdh"]
+
+## Run the high-level asymmetric P-384 API (`asymmetric::p384`) in software
+## via the `p384` crate, calling RustCrypto directly instead of the `P384Ec`
+## unitrait. Enables the p384 ECDSA machinery; without it, the `p384_ec`
+## high-level API compiles with no software EC stack, so an asm/HAL backend
+## can serve it — smaller code size for that use case.
+driver-p384-ec = ["p384-ecdsa", "p384/ecdh"]
+
+## Run the high-level asymmetric X25519 API (`asymmetric::x25519`) in software
+## via the `x25519-dalek` crate, calling it directly instead of the `X25519`
+## unitrait. Without it, the `x25519` high-level API compiles with no
+## software X25519 stack, so an asm/HAL backend can serve it — smaller code
+## size for that use case.
+driver-x25519 = ["dep:x25519-dalek"]
 
 driver-md5 = ["dep:md-5"]
 driver-sha1 = ["dep:sha1"]

@@ -31,6 +31,17 @@ at link time.
 - `P256Ecdh` — key generation, public-key derivation, and shared-secret computation for TLS and Bluetooth LE Secure Connections
 - `P256Ecdsa` — sign and verify pre-hashed digests for TLS certificate authentication
 
+## Elliptic Curve (P384)
+- `P384Ecdh` — key generation, public-key derivation, and shared-secret computation for TLS
+- `P384Ecdsa` — sign and verify pre-hashed digests for TLS certificate authentication
+
+## X25519 (Curve25519)
+- `X25519` — key generation, public-key derivation, and X25519 shared-secret computation for TLS 1.3 ECDHE
+
+## High-level EC operations
+- `P256Ec` — combined P-256 ECDH + ECDSA unitrait serving `embassy-crypto`'s `asymmetric` module
+- `P384Ec` — combined P-384 ECDH + ECDSA unitrait serving `embassy-crypto`'s `asymmetric::p384` module
+
 # Driver Registration
 A HAL crate registers itself by invoking the generated `*_impl!` macro
 for each supported algorithm. Only one crate in the dependency tree may

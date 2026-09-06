@@ -1045,6 +1045,33 @@ pub struct P384AffinePoint {
     pub y: [u8; 48],
 }
 
+/// An X25519 private key: 32-byte Curve25519 scalar, little-endian.
+///
+/// The scalar is stored unclamped; implementations clamp as part of the
+/// X25519 function (RFC 7748).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct X25519PrivateKey(pub [u8; 32]);
+
+/// An X25519 public key: 32-byte Curve25519 u-coordinate, little-endian
+/// (RFC 7748).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct X25519PublicKey(pub [u8; 32]);
+
+impl Default for P384AffinePoint {
+    fn default() -> Self {
+        P384AffinePoint {
+            x: [0u8; 48],
+            y: [0u8; 48],
+        }
+    }
+}
+
+impl Default for P384Scalar {
+    fn default() -> Self {
+        P384Scalar([0u8; 48])
+    }
+}
+
 unitrait::unitrait! {
     /// P-384 scalar multiplication accelerator.
     ///
@@ -1168,6 +1195,14 @@ pub struct P256Signature {
     pub s: P256Scalar,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct P384Signature {
+    /// `r` component, canonical big-endian.
+    pub r: P384Scalar,
+    /// `s` component, canonical big-endian, low-S normalized.
+    pub s: P384Scalar,
+}
+
 unitrait::unitrait! {
     /// High-level P-256 operations for TLS 1.3 and BLE Secure Connections.
     ///
@@ -1252,4 +1287,146 @@ unitrait::unitrait! {
     pub struct P256EcImpl;
 
     macro p256_ec_impl(path = $crate);
+}
+
+unitrait::unitrait! {
+    /// High-level P-384 operations for TLS 1.3.
+    ///
+    /// Each method corresponds to one operation a TLS 1.3 stack
+    /// performs, so a hardware backend can implement it end-to-end where the
+    /// peripheral natively supports the whole operation. Everything below
+    /// this layer (field arithmetic, point encoding, hashing, HKDF) stays in
+    /// software in `embassy-crypto`, composing with [`Sha256`],
+    /// [`HmacSha256`], [`Aes128Gcm`] and [`Aes128Cmac`].
+    ///
+    /// ## Entropy
+    ///
+    /// Methods that need fresh randomness take `rng` and must draw their
+    /// nonce/ephemeral scalar from it, using rejection sampling until the
+    /// value lands in `[1, n-1]`. Hardware whose operation mandates an
+    /// internal entropy source (e.g. peripherals that generate the ECDSA
+    /// nonce on-chip from a TRNG) may ignore `rng`; such implementations must
+    /// document this. For deterministic known-answer tests, callers inject a
+    /// deterministic [`Rng`].
+    ///
+    /// ## Contract
+    ///
+    /// - All private/ephemeral scalars and signature components are canonical
+    ///   (`[1, n-1]`); non-canonical inputs return [`CryptoError::InvalidKey`]
+    ///   or [`CryptoError::InvalidInput`].
+    /// - All points are valid on-curve affine points in canonical big-endian
+    ///   encoding. Callers must run [`P384Ec::validate_point`] on untrusted
+    ///   peer public keys (TLS 1.3 RFC 8446 4.4.3.2, BLE Core Spec Vol 6
+    ///   5.8.4.4) before [`P384Ec::ecdh_shared_secret`] or
+    ///   [`P384Ec::ecdsa_verify`].
+    /// - No secret-dependent timing w.r.t. private keys, nonces, or ephemeral
+    ///   scalars. [`P384Ec::ecdsa_verify`] may be variable-time.
+    /// - Implementations wipe nonce/scalar copies they materialize in RAM.
+    #[symbol_prefix = "_embassy_crypto_p384_ec"]
+    pub trait P384Ec {
+        /// Generate a fresh keypair: `d` uniform in `[1, n-1]`, `Q = d * G`.
+        ///
+        /// Used for TLS 1.3 ECDHE keygen.
+        fn generate_keypair(
+            rng: &mut dyn Rng,
+        ) -> Result<(P384Scalar, P384AffinePoint), CryptoError>;
+
+        /// Derive the public key `k * G` from a known private scalar.
+        ///
+        /// No RNG: used for persistent keys (e.g. a TLS static ECDSA identity
+        /// loaded from flash, or deriving a BLE public key from a stored
+        /// secret) where the caller already holds `k`.
+        fn public_key(k: P384Scalar) -> Result<P384AffinePoint, CryptoError>;
+
+        /// Validate that `p` is a non-identity point on the P-384 curve.
+        fn validate_point(p: &P384AffinePoint) -> bool;
+
+        /// ECDH shared secret: X coordinate of `k * peer`, big-endian.
+        ///
+        /// This is the TLS 1.3 `ecdhe_shared_secret` (fed into HKDF via
+        /// [`HmacSha256`]) and the BLE LE-SC `DHKey`.
+        fn ecdh_shared_secret(
+            k: P384Scalar,
+            peer: P384AffinePoint,
+        ) -> Result<[u8; 48], CryptoError>;
+
+        /// ECDSA sign a pre-hashed message (`ecdsa_secp384r1_sha384`).
+        ///
+        /// The nonce is drawn from `rng` unless the hardware mandates an
+        /// internal entropy source. Returns a low-S normalized signature.
+        fn ecdsa_sign(
+            k: P384Scalar,
+            digest: &[u8; 48],
+            rng: &mut dyn Rng,
+        ) -> Result<P384Signature, CryptoError>;
+
+        /// ECDSA verify a pre-hashed message. All inputs public; may be
+        /// variable-time. `Err(CryptoError::InvalidSignature)` on failure.
+        fn ecdsa_verify(
+            q: P384AffinePoint,
+            digest: &[u8; 48],
+            sig: &P384Signature,
+        ) -> Result<(), CryptoError>;
+    }
+
+    /// The global [`P384Ec`] implementation.
+    pub struct P384EcImpl;
+
+    macro p384_ec_impl(path = $crate);
+}
+
+unitrait::unitrait! {
+    /// X25519 (Curve25519) ECDH operations for TLS 1.3.
+    ///
+    /// Each method corresponds to one operation a TLS 1.3 stack
+    /// performs, so a hardware backend can implement it end-to-end where the
+    /// peripheral natively supports the whole operation. Everything below
+    /// this layer (point encoding, hashing, HKDF) stays in software in
+    /// `embassy-crypto`, composing with [`Sha256`], [`HmacSha256`],
+    /// [`Aes128Gcm`] and [`Aes128Cmac`].
+    ///
+    /// ## Entropy
+    ///
+    /// [`X25519::generate_keypair`] draws the ephemeral scalar from the
+    /// caller-provided [`Rng`]; hardware with an internal entropy source may
+    /// ignore it, but must document that. For deterministic known-answer
+    /// tests, callers inject a deterministic [`Rng`].
+    ///
+    /// ## Contract
+    ///
+    /// - All keys use the canonical RFC 7748 encodings (32 bytes,
+    ///   little-endian); other inputs return [`CryptoError::InvalidKey`].
+    /// - X25519 accepts all 32-byte u-coordinates as peer public keys, so no
+    ///   point validation is required before [`X25519::ecdh_shared_secret`].
+    /// - No secret-dependent timing w.r.t. private scalars.
+    /// - Implementations wipe scalar copies they materialize in RAM.
+    #[symbol_prefix = "_embassy_crypto_x25519"]
+    pub trait X25519 {
+        /// Generate a fresh keypair: scalar `k`, `Q = X25519(k, 9)`.
+        ///
+        /// Used for TLS 1.3 ECDHE keygen.
+        fn generate_keypair(
+            rng: &mut dyn Rng,
+        ) -> Result<(X25519PrivateKey, X25519PublicKey), CryptoError>;
+
+        /// Derive the public key from a known private scalar.
+        ///
+        /// No RNG: used for persistent keys (e.g. a TLS static ECDH identity
+        /// loaded from flash) where the caller already holds `k`.
+        fn public_key(k: X25519PrivateKey) -> Result<X25519PublicKey, CryptoError>;
+
+        /// X25519 shared secret: `X25519(k, peer)`, 32 bytes.
+        ///
+        /// This is the TLS 1.3 `ecdhe_shared_secret` (fed into HKDF via
+        /// [`HmacSha256`]).
+        fn ecdh_shared_secret(
+            k: X25519PrivateKey,
+            peer: X25519PublicKey,
+        ) -> Result<[u8; 32], CryptoError>;
+    }
+
+    /// The global [`X25519`] implementation.
+    pub struct X25519Impl;
+
+    macro x25519_impl(path = $crate);
 }
