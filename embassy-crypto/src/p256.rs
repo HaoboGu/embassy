@@ -73,10 +73,11 @@ impl Backend for p256::NistP256 {
     // ON, the wrappers run this operation in software directly (converting
     // to the canonical byte form the driver unitraits exchange is only worth
     // paying when an accelerator is behind them), so `ACCELERATED_*` is
-    // false and the unitrait is never called; `driver_rustcrypto` still
-    // registers an `unreachable!()` impl of it so a HAL that also registers
-    // one fails to link. With the feature OFF, the wrappers route through
-    // the unitrait and the HAL must provide the impl.
+    // false and the unitrait is never called; nothing registers it, so no
+    // link-time global is staked — that is what allows multiple versions of
+    // `embassy-crypto` (and of the RustCrypto traits) against a single
+    // `embassy-crypto-driver`. With the feature OFF, the wrappers route
+    // through the unitrait and the HAL must provide the impl.
     const ACCELERATED_MUL: bool = cfg!(not(feature = "driver-p256-scalar-mul"));
     const ACCELERATED_INVERT: bool = cfg!(not(feature = "driver-p256-scalar-invert"));
     const ACCELERATED_LINCOMB: bool = cfg!(not(feature = "driver-p256-lincomb"));

@@ -6,15 +6,27 @@ This crate wraps the hardware-agnostic unitraits from `embassy-crypto-driver`
 with the standard RustCrypto traits, so existing RustCrypto code can use
 embassy-registered crypto drivers without modification.
 
-# crate design
+# Crate design
 
 - The crate must match closely to the existing rustcrypto API. Deviations from this API
   must have a very good reason that can be clearly explained.
-- Aside from RNG, every operation must have a backing rustcrypto driver that serves as
-  the reference implementation. *embassy-crypto* should function as a thin layer that calls
-  into rustcrypto with the `driver-rustcrypto` feature enabled (this means that if the `driver-x`
-  feature is not enabled when an *embassy-crypto* type is used and no other crate provides an 
-  implementation, then the binary will fail to link).
+- If a `driver-x` feature is enabled, the corresponding operation is performed by calling
+  the RustCrypto crate *directly* — no driver unitrait is involved and no link-time driver
+  is registered. If the `driver-x` feature is not enabled, the *embassy-crypto* type is a
+  thin layer over the `embassy-crypto-driver` unitrait: any crate (a HAL, an asm backend,
+  another software crate) can register the driver, and if none does the binary fails to link.
+- The reason for calling RustCrypto directly instead of registering a RustCrypto-backed
+  driver for the unitrait (as an earlier design did with a `driver-rustcrypto` module):
+  it lets multiple versions of *embassy-crypto* — and therefore multiple versions of the
+  RustCrypto trait crates — be used in the same binary with a single version of
+  *embassy-crypto-driver*. Registering a driver stakes a link-time global defined in
+  *embassy-crypto-driver*; two versions of *embassy-crypto* would both try to define it
+  and fail to link. Direct calls stake nothing.
+- Composite operations keep layering: e.g. with `driver-aes128cbc` enabled but
+  `driver-aes128` disabled, `Aes128CbcEncrypt` is the RustCrypto CBC mode built on
+  `Aes128`, which still routes through the accelerated ECB unitrait — so hardware
+  acceleration of a lower layer benefits all modes built on top of it. Same for
+  `HmacSha256` = `SimpleHmac<Sha256>` when `driver-hmac-sha2` is on but `driver-sha2` is off.
 - Given that hardware takes some time to setup, the *embassy-crypto* types should batch
   operations with calls into the unitrait that operate on large buffers where possible.
   At least, the implemented traits or methods should allow the user the possibility of this.
@@ -40,6 +52,14 @@ embassy-registered crypto drivers without modification.
 
 ## MAC
 - `Aes128Cmac`, `Aes256Cmac` — CMAC
+
+## Asymmetric
+- `asymmetric` — P-256 ECDH and ECDSA (SecretKey / PublicKey / Signature / SharedSecret)
+- `asymmetric::p384` — P-384 ECDH and ECDSA
+- `asymmetric::x25519` — X25519 (Curve25519) ECDH
+
+## Elliptic-curve arithmetic
+- `ec`, `p256`, `p384` modules — RustCrypto curve trait implementations over driver-accelerated backends
 
 # Digest Usage
 ```rust,ignore
@@ -86,12 +106,21 @@ At link time exactly one crate in the dependency tree must register a driver
 using the `embassy_crypto_*_impl!` macros from `embassy-crypto-driver`.
 If zero or multiple drivers are registered, linking will fail.
 
+Enabling a `driver-x` feature removes the corresponding unitrait from the link
+entirely (RustCrypto is called directly), so no driver needs to be registered
+for it.
+
+# `Hkdf` compatibility
+When the corresponding `driver-*` feature is enabled, the hash types are the
+RustCrypto types themselves, which implement the block-level core that `Hmac`
+requires, so `hkdf::Hkdf<Sha256>` works.  With the feature off, the wrapper
+only exposes `Update`/`FixedOutput`/`BlockSizeUser` and `Hkdf` will not compile;
+only `hkdf::SimpleHkdf<Sha256>` (which uses `SimpleHmac`) is available.
+
 # TODO
 
 - RNG, backed by the MCU peripheral (`embassy-nrf`, `embassy-stm32`, `embassy-rp`, `embassy-mspm0` and `embassy-imxrt` all have one)
-- P256 ECDH and ECDSA (`p256`), for `trouble-host` LE Secure Connections and `embedded-tls`
-- P384 ECDH and ECDSA (`p384`)
-- X25519 and Ed25519 (`x25519-dalek`, `ed25519-dalek`), needed by `embassy-boot`; not RustCrypto, so the reference driver rule needs a decision first
+- Ed25519 (`ed25519-dalek`), needed by `embassy-boot`; not RustCrypto, so the reference driver rule needs a decision first
 - ChaCha20-Poly1305 (`chacha20poly1305`), accelerated by CryptoCell 312
 - SHA-3 and SHAKE (`sha3`)
 - AES key wrap (`aes-kw`), for moving keys in and out of hardware key stores
