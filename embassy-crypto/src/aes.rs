@@ -509,8 +509,7 @@ macro_rules! impl_cmac {
         impl ::digest::Reset for $name {
             #[inline]
             fn reset(&mut self) {
-                // *self = Self::default();
-                todo!();
+                <$drv>::reset(&mut self.ctx);
             }
         }
 
