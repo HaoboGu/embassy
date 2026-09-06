@@ -352,8 +352,11 @@ fn calculate_psc_arr(period_clocks: u64, round: RoundTo, max_arr_bits: usize) ->
     }
 
     // We need: period_clocks = (psc + 1) * (arr + 1)
-    // Calculate minimum prescaler needed: psc >= period_clocks / (max_arr + 1) - 1
-    let psc_min = period_clocks.saturating_sub(1) / (max_arr + 1);
+    // Calculate minimum prescaler needed:
+    // psc >= period_clocks / (max_arr + 1) - 1
+    // but it is an integer, therefore:
+    // psc >= ceil(period_clocks / (max_arr + 1)) - 1
+    let psc_min = period_clocks.div_ceil(max_arr + 1).saturating_sub(1);
     let psc: u16 = match psc_min.try_into() {
         Ok(v) => v,
         Err(_) => {
