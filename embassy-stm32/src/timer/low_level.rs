@@ -1782,7 +1782,7 @@ mod tests {
         center_faster: false,
     };
 
-    /// Test cases: (period_clocks, max_arr_bits, expect_fail_slower, expect_fail_faster)
+    /// Test cases: (period_clocks, max_arr_bits, expect_fail)
     const TEST_CASES: &[(u64, usize, ExpactFail)] = &[
         // Small periods (no prescaler needed for 16-bit)
         // period=0,1 fail for Faster because min achievable is 2 (arr=1)
@@ -1860,7 +1860,7 @@ mod tests {
                         )
                     });
 
-                    // Verify actual_period_clocks matches (psc + 1) * (arr + 1)
+                    // Verify actual_period_clocks is valid
                     let computed_actual = actual_clocks(config.psc, config.arr, center_aligned);
                     assert_eq!(
                         config.actual_period_clocks, computed_actual,
