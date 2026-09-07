@@ -1749,171 +1749,190 @@ impl<'d, T: AdvancedInstance4Channel> Timer<'d, T> {
 mod tests {
     use super::*;
 
+    struct ExpactFail {
+        edge_slower: bool,
+        edge_faster: bool,
+        center_slower: bool,
+        center_faster: bool,
+    }
+
+    const FAIL_EDGE_SLOWER: ExpactFail = ExpactFail { edge_slower: true, edge_faster: false, center_slower: false, center_faster: false };
+    const FAIL_FASTER: ExpactFail = ExpactFail { edge_slower: false, edge_faster: true, center_slower: false, center_faster: true };
+    const NO_FAIL: ExpactFail = ExpactFail { edge_slower: false, edge_faster: false, center_slower: false, center_faster: false };
+
     /// Test cases: (period_clocks, max_arr_bits, expect_fail_slower, expect_fail_faster)
-    const TEST_CASES: &[(u64, usize, bool, bool)] = &[
+    const TEST_CASES: &[(u64, usize, ExpactFail)] = &[
         // Small periods (no prescaler needed for 16-bit)
         // period=0,1 fail for Faster because min achievable is 2 (arr=1)
-        (0, 16, false, true),
-        (1, 16, false, true),
-        (2, 16, false, false), // Minimum achievable period
-        (100, 16, false, false),
-        (1000, 16, false, false),
-        (65535, 16, false, false),
-        (65536, 16, false, false),
+        (0, 16, FAIL_FASTER),
+        (1, 16, FAIL_FASTER),
+        (2, 16, NO_FAIL), // Minimum achievable period
+        (100, 16, NO_FAIL),
+        (1000, 16, NO_FAIL),
+        (65535, 16, NO_FAIL),
+        (65536, 16, NO_FAIL),
         // Periods requiring prescaler for 16-bit
-        (65537, 16, false, false),
-        (100_000, 16, false, false),
-        (1_000_000, 16, false, false),
-        (10_000_000, 16, false, false),
+        (65537, 16, NO_FAIL),
+        (100_000, 16, NO_FAIL),
+        (1_000_000, 16, NO_FAIL),
+        (10_000_000, 16, NO_FAIL),
         // Edge cases around boundaries
-        (131070, 16, false, false), // 2 * 65535
-        (131072, 16, false, false), // 2 * 65536
-        (196605, 16, false, false), // 3 * 65535
+        (131070, 16, NO_FAIL), // 2 * 65535
+        (131072, 16, NO_FAIL), // 2 * 65536
+        (196605, 16, NO_FAIL), // 3 * 65535
         // 32-bit timer cases
-        (0, 32, false, true),
-        (1, 32, false, true),
-        (2, 32, false, false),
-        (100_000, 32, false, false),
-        (1_000_000_000, 32, false, false),
-        (4_294_967_295, 32, false, false), // u32::MAX
-        (4_294_967_296, 32, false, false), // u32::MAX + 1
+        (0, 32, FAIL_FASTER),
+        (1, 32, FAIL_FASTER),
+        (2, 32, NO_FAIL),
+        (100_000, 32, NO_FAIL),
+        (1_000_000_000, 32, NO_FAIL),
+        (4_294_967_295, 32, NO_FAIL), // u32::MAX
+        (4_294_967_296, 32, NO_FAIL), // u32::MAX + 1
         // Very large periods that would overflow 16-bit prescaler for Slower
         // max_arr for 16-bit is 65535, so max period with psc=65535 is 65536*65536 = 4_294_967_296
         // Anything larger than that fails for Slower (need actual >= requested, impossible)
         // For Faster, it still works (need actual <= requested, can always use max period)
-        (4_294_967_297, 16, true, false), // Just over 16-bit max, fails Slower only
+        (4_294_967_297, 16, FAIL_EDGE_SLOWER), // Just over 16-bit max, fails Slower only
     ];
 
-    fn actual_clocks(psc: u16, arr: u64) -> u64 {
-        (psc as u64 + 1) * (arr + 1)
+    fn actual_clocks(psc: u16, arr: u64, center_aligned: bool) -> u64 {
+        if center_aligned {
+            (psc as u64 + 1) * (2 * arr)
+        } else {
+            (psc as u64 + 1) * (arr + 1)
+        }
     }
 
     #[test]
     fn test_calculate_psc_arr() {
-        for &(period_clocks, max_arr_bits, expect_fail_slower, expect_fail_faster) in TEST_CASES {
+        for &(period_clocks, max_arr_bits, ref expect_fail) in TEST_CASES {
             let max_arr: u64 = (1 << max_arr_bits) - 1;
 
-            for round in [RoundTo::Slower, RoundTo::Faster] {
-                let expect_fail = match round {
-                    RoundTo::Slower => expect_fail_slower,
-                    RoundTo::Faster => expect_fail_faster,
-                };
-
-                let result = calculate_psc_arr(period_clocks, round, max_arr_bits, false);
-
-                if expect_fail {
-                    assert!(
-                        result.is_err(),
-                        "Expected failure for period_clocks={}, round={:?}, max_arr_bits={}, but got {:?}",
-                        period_clocks,
-                        round,
-                        max_arr_bits,
-                        result
-                    );
-                    continue;
-                }
-
-                let config = result.unwrap_or_else(|_| {
-                    panic!(
-                        "Unexpected failure for period_clocks={}, round={:?}, max_arr_bits={}",
-                        period_clocks, round, max_arr_bits
-                    )
-                });
-
-                // Verify actual_period_clocks matches (psc + 1) * (arr + 1)
-                let computed_actual = actual_clocks(config.psc, config.arr);
-                assert_eq!(
-                    config.actual_period_clocks, computed_actual,
-                    "actual_period_clocks mismatch for period_clocks={}, round={:?}",
-                    period_clocks, round
-                );
-
-                // Verify arr is within bounds (min is 1)
-                assert!(
-                    config.arr >= 1 && config.arr <= max_arr,
-                    "arr {} out of bounds [1, {}] for period_clocks={}, round={:?}",
-                    config.arr,
-                    max_arr,
-                    period_clocks,
-                    round
-                );
-
-                // Check rounding constraint
-                match round {
-                    RoundTo::Slower => {
-                        assert!(
-                            config.actual_period_clocks >= period_clocks,
-                            "Slower: actual {} < requested {} for period_clocks={}, max_arr_bits={}",
-                            config.actual_period_clocks,
-                            period_clocks,
-                            period_clocks,
-                            max_arr_bits
-                        );
-                    }
-                    RoundTo::Faster => {
-                        assert!(
-                            config.actual_period_clocks <= period_clocks,
-                            "Faster: actual {} > requested {} for period_clocks={}, max_arr_bits={}",
-                            config.actual_period_clocks,
-                            period_clocks,
-                            period_clocks,
-                            max_arr_bits
-                        );
-                    }
-                }
-
-                // Test mutations: verify the solution is not obviously suboptimal.
-                // Try all combinations of psc +/- 1 and arr +/- 1
-                // This doesn't guarantee optimality. but it's enough to catch dumb off-by-one bugs.
-                // Guaranteeing optimality would require searching all divisors of `period_clocks` which is obviously too expensive.
-                let mutations: [(i32, i64); 8] = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)];
-
-                for (psc_delta, arr_delta) in mutations {
-                    let new_psc = config.psc as i32 + psc_delta;
-                    let new_arr = config.arr as i64 + arr_delta;
-
-                    // Skip invalid mutations
-                    if new_psc < 0 || new_psc > u16::MAX as i32 {
-                        continue;
-                    }
-                    if new_arr < 1 || new_arr > max_arr as i64 {
-                        continue;
-                    }
-
-                    let new_psc = new_psc as u16;
-                    let new_arr = new_arr as u64;
-                    let new_actual = actual_clocks(new_psc, new_arr);
-
-                    // Check if mutation satisfies the rounding constraint
-                    let satisfies_constraint = match round {
-                        RoundTo::Slower => new_actual >= period_clocks,
-                        RoundTo::Faster => new_actual <= period_clocks,
+            for center_aligned in [false, true] {
+                for round in [RoundTo::Slower, RoundTo::Faster] {
+                    let expect_fail = match (center_aligned, round) {
+                        (false, RoundTo::Slower) => expect_fail.edge_slower,
+                        (false, RoundTo::Faster) => expect_fail.edge_faster,
+                        (true, RoundTo::Slower) => expect_fail.center_slower,
+                        (true, RoundTo::Faster) => expect_fail.center_faster,
                     };
 
-                    if satisfies_constraint {
-                        // If it satisfies the constraint, it should not be better (closer) than our solution
-                        let our_distance = (config.actual_period_clocks as i64 - period_clocks as i64).abs();
-                        let new_distance = (new_actual as i64 - period_clocks as i64).abs();
+                    let result = calculate_psc_arr(period_clocks, round, max_arr_bits, center_aligned);
 
+                    if expect_fail {
                         assert!(
-                            new_distance >= our_distance,
-                            "Found better solution via mutation for period_clocks={}, round={:?}, max_arr_bits={}: \
-                             original (psc={}, arr={}, actual={}, dist={}) vs \
-                             mutated (psc={}, arr={}, actual={}, dist={})",
+                            result.is_err(),
+                            "Expected failure for period_clocks={}, round={:?}, max_arr_bits={}, but got {:?}",
                             period_clocks,
                             round,
                             max_arr_bits,
-                            config.psc,
-                            config.arr,
-                            config.actual_period_clocks,
-                            our_distance,
-                            new_psc,
-                            new_arr,
-                            new_actual,
-                            new_distance
+                            result
                         );
+                        continue;
                     }
-                    // If mutation doesn't satisfy constraint, that's fine - our solution is better
+
+                    let config = result.unwrap_or_else(|_| {
+                        panic!(
+                            "Unexpected failure for period_clocks={}, round={:?}, max_arr_bits={}",
+                            period_clocks, round, max_arr_bits
+                        )
+                    });
+
+                    // Verify actual_period_clocks matches (psc + 1) * (arr + 1)
+                    let computed_actual = actual_clocks(config.psc, config.arr, center_aligned);
+                    assert_eq!(
+                        config.actual_period_clocks, computed_actual,
+                        "actual_period_clocks mismatch for period_clocks={}, round={:?}",
+                        period_clocks, round
+                    );
+
+                    // Verify arr is within bounds (min is 1)
+                    assert!(
+                        config.arr >= 1 && config.arr <= max_arr,
+                        "arr {} out of bounds [1, {}] for period_clocks={}, round={:?}",
+                        config.arr,
+                        max_arr,
+                        period_clocks,
+                        round
+                    );
+
+                    // Check rounding constraint
+                    match round {
+                        RoundTo::Slower => {
+                            assert!(
+                                config.actual_period_clocks >= period_clocks,
+                                "Slower: actual {} < requested {} for period_clocks={}, max_arr_bits={}",
+                                config.actual_period_clocks,
+                                period_clocks,
+                                period_clocks,
+                                max_arr_bits
+                            );
+                        }
+                        RoundTo::Faster => {
+                            assert!(
+                                config.actual_period_clocks <= period_clocks,
+                                "Faster: actual {} > requested {} for period_clocks={}, max_arr_bits={}",
+                                config.actual_period_clocks,
+                                period_clocks,
+                                period_clocks,
+                                max_arr_bits
+                            );
+                        }
+                    }
+
+                    // Test mutations: verify the solution is not obviously suboptimal.
+                    // Try all combinations of psc +/- 1 and arr +/- 1
+                    // This doesn't guarantee optimality. but it's enough to catch dumb off-by-one bugs.
+                    // Guaranteeing optimality would require searching all divisors of `period_clocks` which is obviously too expensive.
+                    let mutations: [(i32, i64); 8] = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)];
+
+                    for (psc_delta, arr_delta) in mutations {
+                        let new_psc = config.psc as i32 + psc_delta;
+                        let new_arr = config.arr as i64 + arr_delta;
+
+                        // Skip invalid mutations
+                        if new_psc < 0 || new_psc > u16::MAX as i32 {
+                            continue;
+                        }
+                        if new_arr < 1 || new_arr > max_arr as i64 {
+                            continue;
+                        }
+
+                        let new_psc = new_psc as u16;
+                        let new_arr = new_arr as u64;
+                        let new_actual = actual_clocks(new_psc, new_arr, true);
+
+                        // Check if mutation satisfies the rounding constraint
+                        let satisfies_constraint = match round {
+                            RoundTo::Slower => new_actual >= period_clocks,
+                            RoundTo::Faster => new_actual <= period_clocks,
+                        };
+
+                        if satisfies_constraint {
+                            // If it satisfies the constraint, it should not be better (closer) than our solution
+                            let our_distance = (config.actual_period_clocks as i64 - period_clocks as i64).abs();
+                            let new_distance = (new_actual as i64 - period_clocks as i64).abs();
+
+                            assert!(
+                                new_distance >= our_distance,
+                                "Found better solution via mutation for period_clocks={}, round={:?}, max_arr_bits={}: \
+                                original (psc={}, arr={}, actual={}, dist={}) vs \
+                                mutated (psc={}, arr={}, actual={}, dist={})",
+                                period_clocks,
+                                round,
+                                max_arr_bits,
+                                config.psc,
+                                config.arr,
+                                config.actual_period_clocks,
+                                our_distance,
+                                new_psc,
+                                new_arr,
+                                new_actual,
+                                new_distance
+                            );
+                        }
+                        // If mutation doesn't satisfy constraint, that's fine - our solution is better
+                    }
                 }
             }
         }
