@@ -258,7 +258,6 @@ where
     id: u32,
     peripheral_initialized: bool,
     hmac_key_processed: bool,
-    first_word_sent: bool,
     /// True when the IN buffer holds the staged trigger word (the saveable
     /// state: NBWP = 1, DINIS = 1). False when the buffer is empty (NBWP = 0,
     /// e.g. right after INIT or after any DCAL-drained phase such as HMAC key
@@ -428,7 +427,6 @@ impl<'d, T: Instance, M: Mode> Hash<'d, T, M> {
             id: 0,
             peripheral_initialized: long_hmac_key,
             hmac_key_processed: false,
-            first_word_sent: false,
             staged: false,
             buffer: <ContextBuffer<A, M>>::new(),
             buflen: 0,
@@ -535,7 +533,6 @@ impl<'d, T: Instance, M: Mode> Hash<'d, T, M> {
             if ctx.buflen == unit {
                 self.accumulate_blocking::<A>(&ctx.buffer()[..unit]);
                 ctx.buflen = 0;
-                ctx.first_word_sent = true;
                 // A full unit always ends with the trigger word of the next
                 // block sitting in the IN buffer (FIFO empty, DIN holding one
                 // word): the saveable "staged" state. Tracked in software
