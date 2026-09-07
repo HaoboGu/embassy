@@ -342,7 +342,7 @@ pub struct OutOfRangeError;
 fn calculate_psc_arr(period_clocks: u64, round: RoundTo, max_arr_bits: usize, center_aligned: bool) -> Result<PscArrConfig, OutOfRangeError> {
     let max_arr: u64 = (1 << max_arr_bits) - 1;
 
-    // We want:
+    // We want to pick psc and arr such that this equation is as close as possible:
     // - In edge aligned mode:
     //   period_clocks = (psc + 1) * (arr + 1)
     // - In center aligned mode:
@@ -358,18 +358,16 @@ fn calculate_psc_arr(period_clocks: u64, round: RoundTo, max_arr_bits: usize, ce
         return Err(OutOfRangeError);
     }
 
-    // Calculate minimum prescaler needed:
+    // Calculate minimum psc such that it satisfies:
     let psc_min = if center_aligned {
-        // In center aligned mode:
-        // psc >= period_clocks / (2 * max_arr) - 1
-        // but it is an integer, therefore:
-        // psc >= ceil(period_clocks / (2 * max_arr)) - 1
+        // In center aligned mode:   period_clocks <= (psc + 1) * (2 * max_arr)
+        // After rearranging:        psc >= period_clocks / (2 * max_arr) - 1
+        // But it is an integer, so: psc >= ceil(period_clocks / (2 * max_arr)) - 1
         period_clocks.div_ceil(2 * max_arr).saturating_sub(1)
     } else {
-        // In edge aligned mode:
-        // period_clocks <= (psc + 1) * (2 * max_arr)
-        // but it is an integer, therefore:
-        // psc >= ceil(period_clocks / (max_arr + 1)) - 1
+        // In edge aligned mode:     period_clocks <= (psc + 1) * (max_arr + 1)
+        // After rearranging:        psc >= period_clocks / (max_arr + 1) - 1
+        // But it is an integer, so: psc >= ceil(period_clocks / (max_arr + 1)) - 1
         period_clocks.div_ceil(max_arr + 1).saturating_sub(1)
     };
     let psc: u16 = match psc_min.try_into() {
@@ -386,20 +384,22 @@ fn calculate_psc_arr(period_clocks: u64, round: RoundTo, max_arr_bits: usize, ce
     // Calculate arr for this prescaler
     let psc_plus_1 = u64::from(psc) + 1;
 
-    // We want actual_clocks as close to period_clocks as possible, respecting rounding mode
+    // We pick arr such that actual_clocks is as close to period_clocks as possible, respecting rounding mode
     if center_aligned {
-        // actual_clocks = (psc + 1) * (2 * arr), so arr = (actual_clocks / (psc + 1)) / 2
+        // In center aligned mode: actual_clocks = (psc + 1) * (2 * arr)
         let arr = match round {
             RoundTo::Faster => {
-                // Round down: actual_clocks <= period_clocks
-                // 2 * arr <= period_clocks / (psc + 1)
-                // arr <= floor(period_clocks / (2 * (psc + 1)))
+                // Round to faster means:    actual_clocks <= period_clocks
+                // So we want:               (psc + 1) * (2 * arr) <= period_clocks
+                // After rearranging:        arr <= period_clocks / (2 * (psc + 1))
+                // But it is an integer, so: arr <= floor(period_clocks / (2 * (psc + 1)))
                 period_clocks / (2 * psc_plus_1)
             }
             RoundTo::Slower => {
-                // Round up: actual_clocks >= period_clocks
-                // 2 * arr >= ceil(period_clocks / (psc + 1))
-                // arr >= ceil(period_clocks / (2 * (psc + 1)))
+                // Round to slower means:    actual_clocks >= period_clocks
+                // So we want:               (psc + 1) * (2 * arr) >= period_clocks
+                // After rearranging:        arr >= period_clocks / (2 * (psc + 1))
+                // But it is an integer, so: arr >= ceil(period_clocks / (2 * (psc + 1)))
                 period_clocks.div_ceil(2 * psc_plus_1)
             }
         };
@@ -414,18 +414,20 @@ fn calculate_psc_arr(period_clocks: u64, round: RoundTo, max_arr_bits: usize, ce
             actual_period_clocks,
         })
     } else {
-        // actual_clocks = (psc + 1) * (arr + 1), so arr = actual_clocks / (psc + 1) - 1
+        // In edge aligned mode: actual_clocks = (psc + 1) * (arr + 1)
         let arr = match round {
             RoundTo::Faster => {
-                // Round down: actual_clocks <= period_clocks
-                // arr + 1 <= period_clocks / (psc + 1)
-                // arr <= floor(period_clocks / (psc + 1)) - 1
+                // Round to faster means:    actual_clocks <= period_clocks
+                // So we want:               (psc + 1) * (arr + 1) <= period_clocks
+                // After rearranging:        arr <= period_clocks / (psc + 1) - 1
+                // But it is an integer, so: arr <= floor(period_clocks / (psc + 1)) - 1
                 (period_clocks / psc_plus_1).saturating_sub(1)
             }
             RoundTo::Slower => {
-                // Round up: actual_clocks >= period_clocks
-                // arr + 1 >= ceil(period_clocks / (psc + 1))
-                // arr >= ceil(period_clocks / (psc + 1)) - 1
+                // Round to faster means:    actual_clocks >= period_clocks
+                // So we want:               (psc + 1) * (arr + 1) >= period_clocks
+                // After rearranging:        arr >= period_clocks / (psc + 1) - 1
+                // But it is an integer, so: arr >= ceil(period_clocks / (psc + 1)) - 1
                 period_clocks.div_ceil(psc_plus_1).saturating_sub(1)
             }
         };
