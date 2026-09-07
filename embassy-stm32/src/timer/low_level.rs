@@ -339,7 +339,12 @@ pub struct OutOfRangeError;
 /// Returns `OutOfRangeError` when:
 /// - `RoundTo::Faster` and `period_clocks < 2`: Cannot achieve period <= 1 (minimum is 2 since ARR >= 1).
 /// - `RoundTo::Slower` and the required prescaler exceeds 16 bits.
-fn calculate_psc_arr(period_clocks: u64, round: RoundTo, max_arr_bits: usize, center_aligned: bool) -> Result<PscArrConfig, OutOfRangeError> {
+fn calculate_psc_arr(
+    period_clocks: u64,
+    round: RoundTo,
+    max_arr_bits: usize,
+    center_aligned: bool,
+) -> Result<PscArrConfig, OutOfRangeError> {
     let max_arr: u64 = (1 << max_arr_bits) - 1;
 
     // We want to pick psc and arr such that this equation is as close as possible:
@@ -1758,9 +1763,24 @@ mod tests {
         center_faster: bool,
     }
 
-    const FAIL_EDGE_SLOWER: ExpactFail = ExpactFail { edge_slower: true, edge_faster: false, center_slower: false, center_faster: false };
-    const FAIL_FASTER: ExpactFail = ExpactFail { edge_slower: false, edge_faster: true, center_slower: false, center_faster: true };
-    const NO_FAIL: ExpactFail = ExpactFail { edge_slower: false, edge_faster: false, center_slower: false, center_faster: false };
+    const FAIL_EDGE_SLOWER: ExpactFail = ExpactFail {
+        edge_slower: true,
+        edge_faster: false,
+        center_slower: false,
+        center_faster: false,
+    };
+    const FAIL_FASTER: ExpactFail = ExpactFail {
+        edge_slower: false,
+        edge_faster: true,
+        center_slower: false,
+        center_faster: true,
+    };
+    const NO_FAIL: ExpactFail = ExpactFail {
+        edge_slower: false,
+        edge_faster: false,
+        center_slower: false,
+        center_faster: false,
+    };
 
     /// Test cases: (period_clocks, max_arr_bits, expect_fail_slower, expect_fail_faster)
     const TEST_CASES: &[(u64, usize, ExpactFail)] = &[
@@ -1886,7 +1906,8 @@ mod tests {
                     // Try all combinations of psc +/- 1 and arr +/- 1
                     // This doesn't guarantee optimality. but it's enough to catch dumb off-by-one bugs.
                     // Guaranteeing optimality would require searching all divisors of `period_clocks` which is obviously too expensive.
-                    let mutations: [(i32, i64); 8] = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)];
+                    let mutations: [(i32, i64); 8] =
+                        [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)];
 
                     for (psc_delta, arr_delta) in mutations {
                         let new_psc = config.psc as i32 + psc_delta;
