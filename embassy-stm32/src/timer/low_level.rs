@@ -339,10 +339,17 @@ pub struct OutOfRangeError;
 /// Returns `OutOfRangeError` when:
 /// - `RoundTo::Faster` and `period_clocks < 2`: Cannot achieve period <= 1 (minimum is 2 since ARR >= 1).
 /// - `RoundTo::Slower` and the required prescaler exceeds 16 bits.
-fn calculate_psc_arr(period_clocks: u64, round: RoundTo, max_arr_bits: usize) -> Result<PscArrConfig, OutOfRangeError> {
+fn calculate_psc_arr(period_clocks: u64, round: RoundTo, max_arr_bits: usize, center_aligned: bool) -> Result<PscArrConfig, OutOfRangeError> {
     let max_arr: u64 = (1 << max_arr_bits) - 1;
 
+    // We want:
+    // - In edge aligned mode:
+    //   period_clocks = (psc + 1) * (arr + 1)
+    // - In center aligned mode:
+    //   period_clocks = (psc + 1) * (2 * arr)
+
     // Minimum achievable period is 2 (psc=0, arr=1), since ARR=0 is not valid.
+    // This is the same for both edge aligned mode and center aligned mode.
     const MIN_PERIOD: u64 = 2;
 
     // For Faster, we need actual_period_clocks <= period_clocks
@@ -351,12 +358,20 @@ fn calculate_psc_arr(period_clocks: u64, round: RoundTo, max_arr_bits: usize) ->
         return Err(OutOfRangeError);
     }
 
-    // We need: period_clocks = (psc + 1) * (arr + 1)
     // Calculate minimum prescaler needed:
-    // psc >= period_clocks / (max_arr + 1) - 1
-    // but it is an integer, therefore:
-    // psc >= ceil(period_clocks / (max_arr + 1)) - 1
-    let psc_min = period_clocks.div_ceil(max_arr + 1).saturating_sub(1);
+    let psc_min = if center_aligned {
+        // In center aligned mode:
+        // psc >= period_clocks / (2 * max_arr) - 1
+        // but it is an integer, therefore:
+        // psc >= ceil(period_clocks / (2 * max_arr)) - 1
+        period_clocks.div_ceil(2 * max_arr).saturating_sub(1)
+    } else {
+        // In edge aligned mode:
+        // period_clocks <= (psc + 1) * (2 * max_arr)
+        // but it is an integer, therefore:
+        // psc >= ceil(period_clocks / (max_arr + 1)) - 1
+        period_clocks.div_ceil(max_arr + 1).saturating_sub(1)
+    };
     let psc: u16 = match psc_min.try_into() {
         Ok(v) => v,
         Err(_) => {
@@ -371,32 +386,60 @@ fn calculate_psc_arr(period_clocks: u64, round: RoundTo, max_arr_bits: usize) ->
     // Calculate arr for this prescaler
     let psc_plus_1 = u64::from(psc) + 1;
 
-    // actual_clocks = (psc + 1) * (arr + 1), so arr = actual_clocks / (psc + 1) - 1
     // We want actual_clocks as close to period_clocks as possible, respecting rounding mode
-    let arr = match round {
-        RoundTo::Faster => {
-            // Round down: actual_clocks <= period_clocks
-            // arr + 1 <= period_clocks / (psc + 1)
-            // arr <= period_clocks / (psc + 1) - 1
-            (period_clocks / psc_plus_1).saturating_sub(1)
-        }
-        RoundTo::Slower => {
-            // Round up: actual_clocks >= period_clocks
-            // arr + 1 >= ceil(period_clocks / (psc + 1))
-            // arr >= ceil(period_clocks / (psc + 1)) - 1
-            period_clocks.div_ceil(psc_plus_1).saturating_sub(1)
-        }
-    };
+    if center_aligned {
+        // actual_clocks = (psc + 1) * (2 * arr), so arr = (actual_clocks / (psc + 1)) / 2
+        let arr = match round {
+            RoundTo::Faster => {
+                // Round down: actual_clocks <= period_clocks
+                // 2 * arr <= period_clocks / (psc + 1)
+                // arr <= floor(period_clocks / (2 * (psc + 1)))
+                period_clocks / (2 * psc_plus_1)
+            }
+            RoundTo::Slower => {
+                // Round up: actual_clocks >= period_clocks
+                // 2 * arr >= ceil(period_clocks / (psc + 1))
+                // arr >= ceil(period_clocks / (2 * (psc + 1)))
+                period_clocks.div_ceil(2 * psc_plus_1)
+            }
+        };
 
-    // Clamp arr to valid range (min is 1, not 0)
-    let arr = arr.clamp(1, max_arr);
-    let actual_period_clocks = psc_plus_1 * (arr + 1);
+        // Clamp arr to valid range (min is 1, not 0)
+        let arr = arr.clamp(1, max_arr);
+        let actual_period_clocks = psc_plus_1 * (2 * arr);
 
-    Ok(PscArrConfig {
-        psc,
-        arr,
-        actual_period_clocks,
-    })
+        Ok(PscArrConfig {
+            psc,
+            arr,
+            actual_period_clocks,
+        })
+    } else {
+        // actual_clocks = (psc + 1) * (arr + 1), so arr = actual_clocks / (psc + 1) - 1
+        let arr = match round {
+            RoundTo::Faster => {
+                // Round down: actual_clocks <= period_clocks
+                // arr + 1 <= period_clocks / (psc + 1)
+                // arr <= floor(period_clocks / (psc + 1)) - 1
+                (period_clocks / psc_plus_1).saturating_sub(1)
+            }
+            RoundTo::Slower => {
+                // Round up: actual_clocks >= period_clocks
+                // arr + 1 >= ceil(period_clocks / (psc + 1))
+                // arr >= ceil(period_clocks / (psc + 1)) - 1
+                period_clocks.div_ceil(psc_plus_1).saturating_sub(1)
+            }
+        };
+
+        // Clamp arr to valid range (min is 1, not 0)
+        let arr = arr.clamp(1, max_arr);
+        let actual_period_clocks = psc_plus_1 * (arr + 1);
+
+        Ok(PscArrConfig {
+            psc,
+            arr,
+            actual_period_clocks,
+        })
+    }
 }
 
 /// Helper to round a division according to the rounding mode.
@@ -521,10 +564,7 @@ impl<'d, T: CoreInstance> Timer<'d, T> {
     /// # Errors
     ///
     /// Returns [`OutOfRangeError`] if the requested period cannot be represented by the timer.
-    pub fn try_set_period_clocks(&self, mut clocks: u64, round: RoundTo) -> Result<(), OutOfRangeError> {
-        if T::is_center_aligned() {
-            clocks = clocks / 2;
-        }
+    pub fn try_set_period_clocks(&self, clocks: u64, round: RoundTo) -> Result<(), OutOfRangeError> {
         self.try_set_period_clocks_internal(clocks, round, T::Word::bits())
     }
 
@@ -534,7 +574,7 @@ impl<'d, T: CoreInstance> Timer<'d, T> {
         round: RoundTo,
         max_arr_bits: usize,
     ) -> Result<(), OutOfRangeError> {
-        let config = calculate_psc_arr(clocks, round, max_arr_bits)?;
+        let config = calculate_psc_arr(clocks, round, max_arr_bits, T::is_center_aligned())?;
         let arr: T::Word = T::Word::try_from(config.arr).map_err(|_| OutOfRangeError)?;
 
         let regs = self.regs_gp32_unchecked();
@@ -1759,7 +1799,7 @@ mod tests {
                     RoundTo::Faster => expect_fail_faster,
                 };
 
-                let result = calculate_psc_arr(period_clocks, round, max_arr_bits);
+                let result = calculate_psc_arr(period_clocks, round, max_arr_bits, false);
 
                 if expect_fail {
                     assert!(
