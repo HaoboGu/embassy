@@ -28,6 +28,15 @@ static EP_IN_WAKERS: [AtomicWaker; 8] = [const { AtomicWaker::new() }; 8];
 static EP_OUT_WAKERS: [AtomicWaker; 8] = [const { AtomicWaker::new() }; 8];
 static READY_ENDPOINTS: AtomicU32 = AtomicU32::new(0);
 
+/// The isochronous endpoint's index. Fixed in hardware, and outside the reach
+/// of the `EPIN`/`EPOUT` register arrays, of `EPDATASTATUS`, and of `HALTED` —
+/// so every path that indexes one of those has to hold it apart.
+const ISO_EP: usize = 8;
+
+/// The isochronous endpoint's buffer, in bytes (nRF52840 Product
+/// Specification, USBD "Isochronous endpoints"; `ISOIN.MAXCNT` is 10 bits).
+pub const ISO_MAX_PACKET_SIZE: usize = 1023;
+
 /// Interrupt handler.
 pub struct InterruptHandler<T: Instance> {
     _phantom: PhantomData<T>,
@@ -65,6 +74,17 @@ impl<T: Instance> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandl
         if regs.events_usbevent().read() != 0 {
             regs.events_usbevent().write_value(0);
             BUS_WAKER.wake();
+        }
+
+        // The isochronous IN endpoint has no EPDATASTATUS bit, and one packet
+        // per frame is all it can send — so the start of a frame is exactly
+        // when it becomes ready again. SOF is only unmasked while that
+        // endpoint is enabled (see `endpoint_set_enabled`), so a device that
+        // never uses isochronous transfers pays nothing for this.
+        if regs.events_sof().read() != 0 {
+            regs.events_sof().write_value(0);
+            READY_ENDPOINTS.fetch_or(In::mask(ISO_EP), Ordering::AcqRel);
+            In::waker(ISO_EP).wake();
         }
 
         if regs.events_epdata().read() != 0 {
@@ -292,6 +312,12 @@ impl<'d, V: VbusDetect> driver::Bus for Bus<'d, V> {
 
     fn endpoint_set_stalled(&mut self, ep_addr: EndpointAddress, stalled: bool) {
         let regs = self.regs;
+        // Isochronous endpoints have no halt feature (USB 2.0 5.12.1), and
+        // EPSTALL's three-bit field cannot even name endpoint 8 — writing it
+        // would stall endpoint 0 instead.
+        if ep_addr.index() == ISO_EP {
+            return;
+        }
         if ep_addr.index() == 0 {
             if stalled {
                 regs.tasks_ep0stall().write_value(1);
@@ -311,6 +337,10 @@ impl<'d, V: VbusDetect> driver::Bus for Bus<'d, V> {
     fn endpoint_is_stalled(&mut self, ep_addr: EndpointAddress) -> bool {
         let regs = self.regs;
         let i = ep_addr.index();
+        // Never halted, and `HALTED.EPIN`/`EPOUT` have no entry for it.
+        if i == ISO_EP {
+            return false;
+        }
         match ep_addr.direction() {
             Direction::Out => regs.halted().epout(i).read().getstatus() == vals::Getstatus::Halted,
             Direction::In => regs.halted().epin(i).read().getstatus() == vals::Getstatus::Halted,
@@ -332,6 +362,22 @@ impl<'d, V: VbusDetect> driver::Bus for Bus<'d, V> {
                     was_enabled = (w.0 & mask) != 0;
                     if enabled { w.0 |= mask } else { w.0 &= !mask }
                 });
+
+                if i == ISO_EP {
+                    if enabled {
+                        // Answer an IN token we have nothing for with a
+                        // zero-length packet rather than nothing at all: hosts
+                        // treat a silent isochronous endpoint as an error,
+                        // where an empty frame is just a gap in the audio.
+                        regs.isoinconfig().write(|w| w.set_response(vals::Response::ZeroData));
+                        // SOF is what marks this endpoint ready again, so the
+                        // interrupt is unmasked for exactly as long as it is in
+                        // use — it fires at 1 kHz.
+                        regs.intenset().write(|w| w.set_sof(true));
+                    } else {
+                        regs.intenclr().write(|w| w.set_sof(true));
+                    }
+                }
 
                 let ready_mask = In::mask(i);
                 if enabled {
@@ -426,7 +472,9 @@ impl EndpointDir for In {
 
     #[inline]
     fn is_enabled(regs: pac::usbd::Usbd, i: usize) -> bool {
-        regs.epinen().read().in_(i)
+        // Raw bit test rather than the PAC's `in_(n)`: bit 8 is the
+        // isochronous endpoint, which that accessor asserts out of range.
+        regs.epinen().read().0 & (1 << i) != 0
     }
 }
 
@@ -443,7 +491,8 @@ impl EndpointDir for Out {
 
     #[inline]
     fn is_enabled(regs: pac::usbd::Usbd, i: usize) -> bool {
-        regs.epouten().read().out(i)
+        // See the `In` impl: bit 8 is the isochronous endpoint.
+        regs.epouten().read().0 & (1 << i) != 0
     }
 }
 
@@ -554,11 +603,16 @@ unsafe fn read_dma(regs: pac::usbd::Usbd, i: usize, buf: &mut [u8]) -> Result<us
 }
 
 unsafe fn write_dma(regs: pac::usbd::Usbd, i: usize, buf: &[u8]) {
-    assert!(buf.len() <= 64);
+    let max = if i == ISO_EP { ISO_MAX_PACKET_SIZE } else { 64 };
+    assert!(buf.len() <= max);
 
     let mut ram_buf: MaybeUninit<[u8; 64]> = MaybeUninit::uninit();
     let ptr = if !slice_in_ram(buf) {
         // EasyDMA can't read FLASH, so we copy through RAM
+        assert!(
+            buf.len() <= 64,
+            "an isochronous packet this large must already be in RAM"
+        );
         let ptr = ram_buf.as_mut_ptr() as *mut u8;
         core::ptr::copy_nonoverlapping(buf.as_ptr(), ptr, buf.len());
         ptr
@@ -568,15 +622,29 @@ unsafe fn write_dma(regs: pac::usbd::Usbd, i: usize, buf: &[u8]) {
 
     // Set the buffer length so the right number of bytes are transmitted.
     // Safety: `buf.len()` has been checked to be <= the max buffer length.
-    regs.epin(i).ptr().write_value(ptr as u32);
-    regs.epin(i).maxcnt().write(|w| w.set_maxcnt(buf.len() as u8));
+    if i == ISO_EP {
+        // The isochronous endpoint has registers of its own; `EPIN`/`ENDEPIN`
+        // and their tasks only go up to 7.
+        regs.isoin().ptr().write_value(ptr as u32);
+        regs.isoin().maxcnt().write(|w| w.set_maxcnt(buf.len() as u16));
 
-    regs.events_endepin(i).write_value(0);
+        regs.events_endisoin().write_value(0);
 
-    dma_start();
-    regs.tasks_startepin(i).write_value(1);
-    while regs.events_endepin(i).read() == 0 {}
-    dma_end();
+        dma_start();
+        regs.tasks_startisoin().write_value(1);
+        while regs.events_endisoin().read() == 0 {}
+        dma_end();
+    } else {
+        regs.epin(i).ptr().write_value(ptr as u32);
+        regs.epin(i).maxcnt().write(|w| w.set_maxcnt(buf.len() as u8));
+
+        regs.events_endepin(i).write_value(0);
+
+        dma_start();
+        regs.tasks_startepin(i).write_value(1);
+        while regs.events_endepin(i).read() == 0 {}
+        dma_end();
+    }
 }
 
 impl<'d> driver::EndpointOut for Endpoint<'d, Out> {
