@@ -167,6 +167,13 @@ impl<'d, V: VbusDetect + 'd> driver::Driver<'d> for Driver<'d, V> {
         packet_size: u16,
         interval_ms: u8,
     ) -> Result<Self::EndpointOut, driver::EndpointAllocError> {
+        // Only the IN direction of the isochronous endpoint is implemented.
+        // The allocator would hand out endpoint 8 for either, and an OUT one
+        // would read through `EPOUT`/`SIZE.EPOUT`, which have no entry for it —
+        // so refuse here rather than return an endpoint that cannot transfer.
+        if ep_type == EndpointType::Isochronous {
+            return Err(driver::EndpointAllocError);
+        }
         let index = self.alloc_out.allocate(ep_type, ep_addr)?;
         let ep_addr = EndpointAddress::from_parts(index, Direction::Out);
         Ok(Endpoint::new(
@@ -267,6 +274,12 @@ impl<'d, V: VbusDetect> driver::Bus for Bus<'d, V> {
                     In::waker(i).wake();
                     Out::waker(i).wake();
                 }
+                // `epinen` above cleared the isochronous endpoint too, and it
+                // is outside that range: mask the SOF that was unmasked only
+                // while it was enabled, and wake it so a write waiting on that
+                // SOF sees the endpoint go away instead of waiting forever.
+                regs.intenclr().write(|w| w.set_sof(true));
+                In::waker(ISO_EP).wake();
 
                 return Poll::Ready(Event::Reset);
             }
